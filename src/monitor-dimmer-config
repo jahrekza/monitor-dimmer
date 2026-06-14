@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+import subprocess
+import os
+import re
+import time
+from pathlib import Path
+
+CONFIG_FILE = Path.home() / ".config/monitor-dimmer.conf"
+OVERLAY_BIN = Path.home() / ".local/bin/monitor-dimmer-overlay"
+SERVICE     = "monitor-dimmer.service"
+
+RESET  = "\033[0m"
+BOLD   = "\033[1m"
+CYAN   = "\033[96m"
+GREEN  = "\033[92m"
+YELLOW = "\033[93m"
+RED    = "\033[91m"
+DIM    = "\033[2m"
+
+
+def load_config():
+    cfg = {
+        "dim_level":      70,
+        "poll_interval":  5,
+        "use_overlay":    True,
+        "right_bus":      None,
+        "game_paths":     [],
+        "vlc_fullscreen": True,
+    }
+    try:
+        for line in CONFIG_FILE.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            k, _, v = line.partition("=")
+            k, v = k.strip(), v.strip()
+            if k == "dim_level":
+                cfg["dim_level"] = int(v)
+            elif k == "poll_interval":
+                cfg["poll_interval"] = int(v)
+            elif k == "use_overlay":
+                cfg["use_overlay"] = v.lower() == "true"
+            elif k == "right_bus":
+                cfg["right_bus"] = int(v)
+            elif k == "game_paths":
+                cfg["game_paths"] = [p.strip() for p in v.split(",") if p.strip()]
+            elif k == "vlc_fullscreen":
+                cfg["vlc_fullscreen"] = v.lower() == "true"
+    except FileNotFoundError:
+        pass
+    return cfg
+
+
+def save_config(cfg):
+    lines = [
+        "# Monitor Dimmer configuration",
+        f"dim_level={cfg['dim_level']}",
+        f"poll_interval={cfg['poll_interval']}",
+        f"use_overlay={str(cfg['use_overlay']).lower()}",
+        f"vlc_fullscreen={str(cfg['vlc_fullscreen']).lower()}",
+    ]
+    if cfg["right_bus"] is not None:
+        lines.append(f"right_bus={cfg['right_bus']}")
+    if cfg["game_paths"]:
+        lines.append(f"game_paths={','.join(cfg['game_paths'])}")
+    CONFIG_FILE.write_text("\n".join(lines) + "\n")
+
+
+def service_status():
+    r = subprocess.run(
+        ["systemctl", "--user", "is-active", SERVICE],
+        capture_output=True, text=True
+    )
+    return r.stdout.strip()
+
+
+def ask_int(prompt, min_val, max_val, default):
+    while True:
+        raw = input(f"{prompt} [{default}]: ").strip()
+        if raw == "":
+            return default
+        try:
+            v = int(raw)
+            if min_val <= v <= max_val:
+                return v
+            print(f"{RED}  Enter a number between {min_val} and {max_val}{RESET}")
+        except ValueError:
+            print(f"{RED}  Not a number{RESET}")
+
+
+def print_header():
+    print(f"\n{BOLD}{CYAN}╔══════════════════════════════════════╗")
+    print(f"║   Monitor Dimmer — Configuration     ║")
+    print(f"╚══════════════════════════════════════╝{RESET}\n")
+
+
+def print_status(cfg):
+    status = service_status()
+    dot    = f"{GREEN}●{RESET}" if status == "active" else f"{RED}●{RESET}"
+    mode   = (f"{CYAN}overlay{RESET} (black window)"
+              if cfg["use_overlay"] else f"{YELLOW}hardware{RESET} (ddcutil)")
+    vlc    = f"{GREEN}yes{RESET}" if cfg["vlc_fullscreen"] else f"{DIM}no{RESET}"
+    paths  = len(cfg["game_paths"])
+
+    print(f"  Service status:     {dot} {status}")
+    print(f"  Dim method:         {mode}")
+    print(f"  Dim intensity:      {YELLOW}{cfg['dim_level']}%{RESET}  {DIM}(0=none, 100=black){RESET}")
+    print(f"  Poll interval:      {YELLOW}{cfg['poll_interval']}s{RESET}")
+    print(f"  VLC fullscreen:     {vlc}")
+    print(f"  Game paths:         {YELLOW}{paths}{RESET} configured")
+    print()
+
+
+def menu_test_dim(cfg):
+    print(f"\n{YELLOW}▸ Testing dim for 3 seconds...{RESET}")
+    if cfg["use_overlay"]:
+        proc = subprocess.Popen(
+            ["python3", str(OVERLAY_BIN), str(cfg["dim_level"] / 100)]
+        )
+        time.sleep(3)
+        proc.terminate()
+    else:
+        bus    = cfg.get("right_bus")
+        target = 100 - cfg["dim_level"]
+        if bus:
+            subprocess.run(
+                ["ddcutil", "setvcp", "10", str(target), "--bus", str(bus)],
+                capture_output=True
+            )
+            time.sleep(3)
+            subprocess.run(
+                ["ddcutil", "setvcp", "10", "100", "--bus", str(bus)],
+                capture_output=True
+            )
+        else:
+            print(f"{RED}  No monitor bus configured{RESET}")
+            return
+    print(f"{GREEN}✓ Done.{RESET}")
+
+
+def menu_toggle_service():
+    if service_status() == "active":
+        subprocess.run(["systemctl", "--user", "stop", SERVICE])
+        print(f"\n{YELLOW}⏹  Service stopped.{RESET}")
+    else:
+        subprocess.run(["systemctl", "--user", "start", SERVICE])
+        print(f"\n{GREEN}▶  Service started.{RESET}")
+
+
+def apply_config(cfg):
+    save_config(cfg)
+    subprocess.run(["systemctl", "--user", "restart", SERVICE])
+    print(f"\n{GREEN}✓ Saved and applied.{RESET}")
+
+
+def main():
+    print_header()
+    cfg = load_config()
+
+    while True:
+        print_status(cfg)
+        mode_label = ("Switch to hardware (ddcutil)"
+                      if cfg["use_overlay"] else "Switch to overlay (black window)")
+        svc_label  = ("Stop service"
+                      if service_status() == "active" else "Start service")
+        vlc_label  = ("Disable VLC fullscreen detection"
+                      if cfg["vlc_fullscreen"] else "Enable VLC fullscreen detection")
+
+        print(f"  {BOLD}1{RESET}  Change dim intensity     ({cfg['dim_level']}%)")
+        print(f"  {BOLD}2{RESET}  Change poll interval     ({cfg['poll_interval']}s)")
+        print(f"  {BOLD}3{RESET}  Test dim")
+        print(f"  {BOLD}4{RESET}  {mode_label}")
+        print(f"  {BOLD}5{RESET}  {vlc_label}")
+        print(f"  {BOLD}6{RESET}  {svc_label}")
+        print(f"  {BOLD}7{RESET}  Save and exit")
+        print(f"  {BOLD}q{RESET}  Quit without saving\n")
+
+        choice = input(f"{CYAN}Choose option: {RESET}").strip().lower()
+        print()
+
+        if choice == "1":
+            print(f"{DIM}  0 = no change, 50 = half brightness, 100 = completely black{RESET}")
+            cfg["dim_level"] = ask_int("  Dim intensity (0–100)", 0, 100, cfg["dim_level"])
+        elif choice == "2":
+            print(f"{DIM}  Lower = faster reaction, more CPU{RESET}")
+            cfg["poll_interval"] = ask_int("  Poll interval in seconds (2–60)", 2, 60, cfg["poll_interval"])
+        elif choice == "3":
+            menu_test_dim(cfg)
+        elif choice == "4":
+            cfg["use_overlay"] = not cfg["use_overlay"]
+            mode = "overlay (black window)" if cfg["use_overlay"] else "hardware (ddcutil)"
+            print(f"{GREEN}✓ Switched to: {mode}{RESET}")
+        elif choice == "5":
+            cfg["vlc_fullscreen"] = not cfg["vlc_fullscreen"]
+            state = "enabled" if cfg["vlc_fullscreen"] else "disabled"
+            print(f"{GREEN}✓ VLC fullscreen detection {state}.{RESET}")
+        elif choice == "6":
+            menu_toggle_service()
+        elif choice == "7":
+            apply_config(cfg)
+            break
+        elif choice == "q":
+            break
+        else:
+            print(f"{RED}  Unknown option{RESET}")
+        print()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print(f"\n{DIM}Cancelled.{RESET}\n")

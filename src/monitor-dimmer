@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+import os
+import sys
+import time
+import subprocess
+import threading
+from pathlib import Path
+
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+except ImportError:
+    print("Missing pystray or Pillow", file=sys.stderr)
+    sys.exit(1)
+
+CONFIG_FILE = Path.home() / ".config/monitor-dimmer.conf"
+OVERLAY_BIN = Path.home() / ".local/bin/monitor-dimmer-overlay"
+
+auto_enabled = True
+game_active  = False
+overlay_proc = None
+lock         = threading.Lock()
+
+
+def load_config():
+    cfg = {
+        "dim_level":      70,
+        "poll_interval":  5,
+        "use_overlay":    True,
+        "right_bus":      None,
+        "game_paths":     [],
+        "vlc_fullscreen": True,
+    }
+    try:
+        for line in CONFIG_FILE.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            k, _, v = line.partition("=")
+            k, v = k.strip(), v.strip()
+            if k == "dim_level":
+                cfg["dim_level"] = int(v)
+            elif k == "poll_interval":
+                cfg["poll_interval"] = int(v)
+            elif k == "use_overlay":
+                cfg["use_overlay"] = v.lower() == "true"
+            elif k == "right_bus":
+                cfg["right_bus"] = int(v)
+            elif k == "game_paths":
+                cfg["game_paths"] = [p.strip() for p in v.split(",") if p.strip()]
+            elif k == "vlc_fullscreen":
+                cfg["vlc_fullscreen"] = v.lower() == "true"
+    except FileNotFoundError:
+        pass
+    return cfg
+
+
+CFG           = load_config()
+DIM_LEVEL     = CFG["dim_level"]
+POLL_INTERVAL = CFG["poll_interval"]
+USE_OVERLAY   = CFG["use_overlay"]
+RIGHT_BUS     = CFG["right_bus"]
+GAME_PATHS    = CFG["game_paths"]
+VLC_FULLSCREEN = CFG["vlc_fullscreen"]
+
+
+def is_vlc_fullscreen():
+    if not VLC_FULLSCREEN:
+        return False
+    try:
+        r = subprocess.run(
+            ["qdbus", "org.mpris.MediaPlayer2.vlc",
+             "/org/mpris/MediaPlayer2",
+             "org.mpris.MediaPlayer2.Fullscreen"],
+            capture_output=True, text=True, timeout=2
+        )
+        return r.stdout.strip().lower() == "true"
+    except Exception:
+        return False
+
+
+def is_game_running():
+    for pid_dir in Path("/proc").iterdir():
+        if not pid_dir.name.isdigit():
+            continue
+        try:
+            exe = os.readlink(pid_dir / "exe")
+            if any(p in exe for p in GAME_PATHS):
+                return True
+        except OSError:
+            continue
+    return is_vlc_fullscreen()
+
+
+def start_overlay():
+    global overlay_proc
+    if overlay_proc and overlay_proc.poll() is None:
+        return
+    opacity = DIM_LEVEL / 100
+    overlay_proc = subprocess.Popen(
+        ["python3", str(OVERLAY_BIN), str(opacity)],
+        env={**os.environ,
+             "DISPLAY": os.environ.get("DISPLAY", ":0"),
+             "WAYLAND_DISPLAY": os.environ.get("WAYLAND_DISPLAY", "wayland-0")}
+    )
+
+
+def stop_overlay():
+    global overlay_proc
+    if overlay_proc and overlay_proc.poll() is None:
+        overlay_proc.terminate()
+    overlay_proc = None
+
+
+def set_brightness(level):
+    if RIGHT_BUS is None:
+        return
+    subprocess.run(
+        ["ddcutil", "setvcp", "10", str(level), "--bus", str(RIGHT_BUS)],
+        capture_output=True, timeout=5
+    )
+
+
+def dim_on():
+    if USE_OVERLAY:
+        start_overlay()
+    else:
+        set_brightness(100 - DIM_LEVEL)
+
+
+def dim_off():
+    if USE_OVERLAY:
+        stop_overlay()
+    else:
+        set_brightness(100)
+
+
+def make_icon(active):
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    c = (80, 200, 80) if active else (130, 130, 130)
+    d.rectangle([6, 10, 58, 46], outline=c, width=4)
+    d.rectangle([20, 46, 44, 54], fill=c)
+    d.rectangle([14, 52, 50, 56], fill=c)
+    if active:
+        d.ellipse([24, 20, 40, 36], fill=c)
+    else:
+        d.ellipse([22, 18, 42, 38], outline=c, width=3)
+    return img
+
+
+def monitor_loop(icon):
+    global game_active
+    while True:
+        time.sleep(POLL_INTERVAL)
+        with lock:
+            enabled     = auto_enabled
+            was_active  = game_active
+        if not enabled:
+            continue
+        running = is_game_running()
+        with lock:
+            game_active = running
+        if running and not was_active:
+            dim_on()
+        elif not running and was_active:
+            dim_off()
+
+
+def on_toggle(icon, item):
+    global auto_enabled
+    with lock:
+        auto_enabled = not auto_enabled
+        enabled = auto_enabled
+        running = game_active
+    icon.icon = make_icon(enabled)
+    if not enabled:
+        dim_off()
+    elif running:
+        dim_on()
+
+
+def on_restore(icon, item):
+    dim_off()
+
+
+def on_quit(icon, item):
+    dim_off()
+    icon.stop()
+    os._exit(0)
+
+
+def main():
+    icon = pystray.Icon("monitor-dimmer")
+    icon.icon = make_icon(True)
+    icon.title = "Monitor Dimmer"
+    icon.menu = pystray.Menu(
+        pystray.MenuItem("Auto-dim", on_toggle, checked=lambda item: auto_enabled),
+        pystray.MenuItem("Restore full brightness", on_restore),
+        pystray.MenuItem("Quit", on_quit),
+    )
+    t = threading.Thread(target=monitor_loop, args=(icon,), daemon=True)
+    t.start()
+    icon.run()
+
+
+if __name__ == "__main__":
+    main()

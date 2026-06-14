@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""Black overlay window on the rightmost screen. Arg: opacity 0.0–1.0"""
+import sys
+import signal
+from PyQt6.QtWidgets import QApplication, QWidget
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor, QPalette
+
+
+def main():
+    opacity = float(sys.argv[1]) if len(sys.argv) > 1 else 0.7
+
+    app = QApplication(sys.argv)
+    screens = app.screens()
+    target  = max(screens, key=lambda s: s.geometry().x())
+
+    w = QWidget()
+    w.setWindowFlags(
+        Qt.WindowType.FramelessWindowHint |
+        Qt.WindowType.WindowStaysOnTopHint |
+        Qt.WindowType.Tool
+    )
+    p = w.palette()
+    p.setColor(QPalette.ColorRole.Window, QColor(0, 0, 0))
+    w.setPalette(p)
+    w.setAutoFillBackground(True)
+    w.setWindowOpacity(opacity)
+
+    w.show()
+    w.windowHandle().setScreen(target)
+    w.setGeometry(target.geometry())
+    w.showFullScreen()
+
+    signal.signal(signal.SIGTERM, lambda *_: app.quit())
+    signal.signal(signal.SIGINT,  lambda *_: app.quit())
+
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
