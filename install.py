@@ -23,6 +23,9 @@ BIN_DIR     = HOME / ".local/bin"
 CONFIG_FILE = HOME / ".config/monitor-dimmer.conf"
 SERVICE_DIR = HOME / ".config/systemd/user"
 APP_DIR     = HOME / ".local/share/applications"
+ICONS_DIR   = HOME / ".local/share/icons"
+ICON_SRC    = REPO_DIR / "assets/dimmer.png"
+ICON_DEST   = ICONS_DIR / "monitor-dimmer.png"
 KDE_STATS   = HOME / ".config/kactivitymanagerd-statsrc"
 
 SCRIPTS = ["monitor-dimmer", "monitor-dimmer-overlay", "monitor-dimmer-config"]
@@ -371,6 +374,15 @@ def write_config(cfg):
     ok(f"Config written to {CONFIG_FILE}")
 
 
+def install_icon():
+    ICONS_DIR.mkdir(parents=True, exist_ok=True)
+    if ICON_SRC.exists():
+        shutil.copy2(ICON_SRC, ICON_DEST)
+        ok(f"Icon installed to {ICON_DEST}")
+    else:
+        warn("Icon file not found in assets/ — skipping")
+
+
 def install_scripts():
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     for name in SCRIPTS:
@@ -381,7 +393,7 @@ def install_scripts():
         ok(f"Installed {dest}")
 
 
-def install_service():
+def install_service(autostart):
     SERVICE_DIR.mkdir(parents=True, exist_ok=True)
     service = SERVICE_DIR / "monitor-dimmer.service"
     service.write_text(f"""[Unit]
@@ -401,12 +413,17 @@ WantedBy=graphical-session.target
 """)
     ok(f"Service file written to {service}")
     run(["systemctl", "--user", "daemon-reload"])
-    run(["systemctl", "--user", "enable", "monitor-dimmer.service"])
-    ok("Service enabled")
+    if autostart:
+        run(["systemctl", "--user", "enable", "monitor-dimmer.service"])
+        ok("Service enabled (starts automatically at login)")
+    else:
+        run(["systemctl", "--user", "disable", "monitor-dimmer.service"])
+        ok("Autostart disabled — start manually with: systemctl --user start monitor-dimmer")
 
 
 def install_desktop_entry():
     APP_DIR.mkdir(parents=True, exist_ok=True)
+    icon = str(ICON_DEST) if ICON_DEST.exists() else "weather-clear-night"
     entry = APP_DIR / "monitor-dimmer-config.desktop"
     entry.write_text(f"""[Desktop Entry]
 Version=1.0
@@ -414,7 +431,7 @@ Type=Application
 Name=Monitor Dimmer
 Comment=Configure auto-dimming of secondary screen during games or fullscreen media
 Exec=konsole --noclose -e monitor-dimmer-config
-Icon=weather-clear-night
+Icon={icon}
 Terminal=false
 Categories=Settings;HardwareSettings;
 Keywords=monitor;brightness;dim;gaming;
@@ -515,24 +532,29 @@ def main():
         print(f"\n  {D}Installation cancelled.{R}\n")
         sys.exit(0)
 
-    # 7. Install
+    # 7. Autostart
+    print()
+    autostart = ask_yes_no("Start Monitor Dimmer automatically at login?")
+
+    # 8. Install
     step("Installing")
+    install_icon()
     write_config(cfg)
     install_scripts()
-    install_service()
+    install_service(autostart)
     install_desktop_entry()
 
-    # 8. KDE favorites (optional)
+    # 9. KDE favorites (optional)
     desktop = os.environ.get("XDG_CURRENT_DESKTOP", "")
     if "KDE" in desktop:
         if ask_yes_no("\nAdd to KDE application launcher favorites?"):
             add_to_kde_favorites()
 
-    # 9. Start
+    # 10. Start
     step("Starting service")
     start_service()
 
-    # 10. Test
+    # 11. Test
     if ask_yes_no("\nRun a quick dim test now?"):
         test_dim(cfg)
 

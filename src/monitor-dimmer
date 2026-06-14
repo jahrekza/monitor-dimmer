@@ -79,14 +79,37 @@ def is_vlc_fullscreen():
         return False
 
 
+def _has_steam_game_id(pid_dir):
+    """Check if process has SteamGameId env var set to a non-zero value (i.e. it's a game, not the Steam client)."""
+    try:
+        environ = (pid_dir / "environ").read_bytes()
+        if b"SteamGameId=" not in environ:
+            return False
+        for entry in environ.split(b"\x00"):
+            if entry.startswith(b"SteamGameId="):
+                val = entry.split(b"=", 1)[1]
+                return val.isdigit() and int(val) > 0
+    except OSError:
+        pass
+    return False
+
+
 def is_game_running():
     for pid_dir in Path("/proc").iterdir():
         if not pid_dir.name.isdigit():
             continue
         try:
-            exe = os.readlink(pid_dir / "exe")
-            if any(p in exe for p in GAME_PATHS):
+            # Steam games via Proton/Wine: check SteamGameId env var
+            if _has_steam_game_id(pid_dir):
                 return True
+            # Native games or Heroic: check exe and cmdline for game paths
+            if GAME_PATHS:
+                exe = os.readlink(pid_dir / "exe")
+                if any(p in exe for p in GAME_PATHS):
+                    return True
+                cmdline = (pid_dir / "cmdline").read_bytes().decode("utf-8", errors="ignore")
+                if any(p in cmdline for p in GAME_PATHS):
+                    return True
         except OSError:
             continue
     return is_vlc_fullscreen()
@@ -135,7 +158,17 @@ def dim_off():
         set_brightness(100)
 
 
+ICON_FILE = Path.home() / ".local/share/icons/monitor-dimmer.png"
+
 def make_icon(active):
+    if ICON_FILE.exists():
+        img = Image.open(ICON_FILE).convert("RGBA").resize((64, 64))
+        if not active:
+            # Greyscale tint when disabled
+            import PIL.ImageOps
+            img = PIL.ImageOps.grayscale(img).convert("RGBA")
+        return img
+    # Fallback: generated icon
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     c = (80, 200, 80) if active else (130, 130, 130)
