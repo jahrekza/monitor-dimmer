@@ -26,6 +26,8 @@ APP_DIR     = HOME / ".local/share/applications"
 ICONS_DIR   = HOME / ".local/share/icons"
 ICON_SRC    = REPO_DIR / "assets/dimmer.png"
 ICON_DEST   = ICONS_DIR / "monitor-dimmer.png"
+SVG_SRC     = REPO_DIR / "assets/monitor-dimmer-symbolic.svg"
+SVG_DEST    = ICONS_DIR / "hicolor/scalable/apps/monitor-dimmer-symbolic.svg"
 KDE_STATS   = HOME / ".config/kactivitymanagerd-statsrc"
 
 SCRIPTS = ["monitor-dimmer", "monitor-dimmer-overlay", "monitor-dimmer-config"]
@@ -378,9 +380,15 @@ def install_icon():
     ICONS_DIR.mkdir(parents=True, exist_ok=True)
     if ICON_SRC.exists():
         shutil.copy2(ICON_SRC, ICON_DEST)
-        ok(f"Icon installed to {ICON_DEST}")
+        ok(f"App icon installed to {ICON_DEST}")
     else:
-        warn("Icon file not found in assets/ — skipping")
+        warn("App icon not found in assets/ — skipping")
+    if SVG_SRC.exists():
+        SVG_DEST.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(SVG_SRC, SVG_DEST)
+        ok(f"Symbolic tray icon installed to {SVG_DEST}")
+    else:
+        warn("Symbolic icon not found in assets/ — skipping")
 
 
 def install_scripts():

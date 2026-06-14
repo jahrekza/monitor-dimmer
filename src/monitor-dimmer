@@ -158,27 +158,29 @@ def dim_off():
         set_brightness(100)
 
 
-ICON_FILE = Path.home() / ".local/share/icons/monitor-dimmer.png"
+TRAY_ICON_NAME = "monitor-dimmer-symbolic"
 
 def make_icon(active):
-    if ICON_FILE.exists():
-        img = Image.open(ICON_FILE).convert("RGBA").resize((64, 64))
-        if not active:
-            # Greyscale tint when disabled
-            import PIL.ImageOps
-            img = PIL.ImageOps.grayscale(img).convert("RGBA")
-        return img
-    # Fallback: generated icon
-    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    c = (80, 200, 80) if active else (130, 130, 130)
-    d.rectangle([6, 10, 58, 46], outline=c, width=4)
-    d.rectangle([20, 46, 44, 54], fill=c)
-    d.rectangle([14, 52, 50, 56], fill=c)
-    if active:
-        d.ellipse([24, 20, 40, 36], fill=c)
-    else:
-        d.ellipse([22, 18, 42, 38], outline=c, width=3)
+    size = 64
+    img  = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d    = ImageDraw.Draw(img)
+
+    # Colours: white active, dim grey inactive — blends with any panel colour
+    fg      = (255, 255, 255, 230) if active else (180, 180, 180, 140)
+    fg_dim  = (255, 255, 255, 70)  if active else (180, 180, 180, 50)
+
+    # Monitor frame
+    d.rounded_rectangle([3, 4, 61, 46], radius=4, outline=fg, width=3)
+    # Left half bright
+    d.rectangle([4, 5, 32, 45], fill=fg)
+    # Right half dimmed
+    d.rounded_rectangle([32, 5, 60, 45], radius=3, fill=fg_dim)
+    # Divider line
+    d.line([32, 5, 32, 45], fill=fg, width=2)
+    # Stand
+    d.line([22, 46, 42, 46], fill=fg, width=3)
+    d.rounded_rectangle([16, 50, 48, 56], radius=2, fill=fg)
+
     return img
 
 
