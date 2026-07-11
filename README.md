@@ -107,7 +107,7 @@ Options available:
 |---------|-------------|
 | Dim intensity | 0 = no change · 50 = half brightness · 100 = fully black |
 | Poll interval | How often to check if a game is running (seconds) |
-| Dim method | Overlay (black window) or hardware (ddcutil) |
+| Dim method | Overlay (black window) or dim (hardware brightness via ddcutil) |
 | VLC detection | Enable/disable fullscreen VLC triggering |
 
 ---
