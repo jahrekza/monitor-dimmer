@@ -97,8 +97,8 @@ def print_header():
 def print_status(cfg):
     status = service_status()
     dot    = f"{GREEN}●{RESET}" if status == "active" else f"{RED}●{RESET}"
-    mode   = (f"{CYAN}dim{RESET} (black window)"
-              if cfg["use_overlay"] else f"{YELLOW}hardware{RESET} (ddcutil)")
+    mode   = (f"{CYAN}overlay{RESET} (black window)"
+              if cfg["use_overlay"] else f"{YELLOW}dim{RESET} (hardware brightness)")
     vlc    = f"{GREEN}yes{RESET}" if cfg["vlc_fullscreen"] else f"{DIM}no{RESET}"
     paths  = len(cfg["game_paths"])
 
@@ -159,8 +159,8 @@ def main():
 
     while True:
         print_status(cfg)
-        mode_label = ("Switch to hardware (ddcutil)"
-                      if cfg["use_overlay"] else "Switch to dim (black window)")
+        mode_label = ("Switch to dim (hardware brightness)"
+                      if cfg["use_overlay"] else "Switch to overlay (black window)")
         svc_label  = ("Stop service"
                       if service_status() == "active" else "Start service")
         vlc_label  = ("Disable VLC fullscreen detection"
@@ -188,7 +188,7 @@ def main():
             menu_test_dim(cfg)
         elif choice == "4":
             cfg["use_overlay"] = not cfg["use_overlay"]
-            mode = "dim (black window)" if cfg["use_overlay"] else "hardware (ddcutil)"
+            mode = "overlay (black window)" if cfg["use_overlay"] else "dim (hardware brightness)"
             print(f"{GREEN}✓ Switched to: {mode}{RESET}")
         elif choice == "5":
             cfg["vlc_fullscreen"] = not cfg["vlc_fullscreen"]
