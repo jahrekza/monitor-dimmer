@@ -98,7 +98,7 @@ Look for the moon icon (🌙) in your taskbar. If it's hidden, click the `▲` a
 ### Configuration wizard
 
 ```bash
-monitor-dimmer-config
+dimmer
 ```
 
 Options available:
@@ -146,10 +146,10 @@ Options available:
 |------|---------|
 | `~/.local/bin/monitor-dimmer` | Main daemon |
 | `~/.local/bin/monitor-dimmer-overlay` | Overlay window process |
-| `~/.local/bin/monitor-dimmer-config` | Configuration wizard |
+| `~/.local/bin/dimmer` | Configuration wizard |
 | `~/.config/monitor-dimmer.conf` | Configuration file |
 | `~/.config/systemd/user/monitor-dimmer.service` | Systemd user service |
-| `~/.local/share/applications/monitor-dimmer-config.desktop` | Desktop entry |
+| `~/.local/share/applications/dimmer.desktop` | Desktop entry |
 
 ### Configuration file format
 
@@ -194,7 +194,7 @@ journalctl --user -u monitor-dimmer.service -n 50
 ```
 
 **Dim not triggering for a game**
-The game executable must be inside one of the configured `game_paths`. Run `monitor-dimmer-config` and check the path list, or add a custom path.
+The game executable must be inside one of the configured `game_paths`. Run `dimmer` and check the path list, or add a custom path.
 
 ---
 

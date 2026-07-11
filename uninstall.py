@@ -10,9 +10,9 @@ R = "\033[0m"; B = "\033[1m"; G = "\033[92m"; Y = "\033[93m"; E = "\033[91m"
 FILES = [
     HOME / ".local/bin/monitor-dimmer",
     HOME / ".local/bin/monitor-dimmer-overlay",
-    HOME / ".local/bin/monitor-dimmer-config",
+    HOME / ".local/bin/dimmer",
     HOME / ".config/systemd/user/monitor-dimmer.service",
-    HOME / ".local/share/applications/monitor-dimmer-config.desktop",
+    HOME / ".local/share/applications/dimmer.desktop",
     HOME / ".config/monitor-dimmer.conf",
 ]
 
@@ -43,9 +43,9 @@ for f in FILES:
 kde_stats = HOME / ".config/kactivitymanagerd-statsrc"
 if kde_stats.exists():
     content = kde_stats.read_text()
-    if "monitor-dimmer-config.desktop" in content:
-        content = content.replace(",applications:monitor-dimmer-config.desktop", "")
-        content = content.replace("applications:monitor-dimmer-config.desktop,", "")
+    if "dimmer.desktop" in content:
+        content = content.replace(",applications:dimmer.desktop", "")
+        content = content.replace("applications:dimmer.desktop,", "")
         kde_stats.write_text(content)
         print(f"  {G}✓{R}  Removed from KDE favorites")
 

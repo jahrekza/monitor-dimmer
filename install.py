@@ -30,7 +30,7 @@ SVG_SRC     = REPO_DIR / "assets/monitor-dimmer-symbolic.svg"
 SVG_DEST    = ICONS_DIR / "hicolor/scalable/apps/monitor-dimmer-symbolic.svg"
 KDE_STATS   = HOME / ".config/kactivitymanagerd-statsrc"
 
-SCRIPTS = ["monitor-dimmer", "monitor-dimmer-overlay", "monitor-dimmer-config"]
+SCRIPTS = ["monitor-dimmer", "monitor-dimmer-overlay", "dimmer"]
 
 # ── Colors ───────────────────────────────────────────────────────────────────
 
@@ -432,13 +432,13 @@ WantedBy=graphical-session.target
 def install_desktop_entry():
     APP_DIR.mkdir(parents=True, exist_ok=True)
     icon = str(ICON_DEST) if ICON_DEST.exists() else "weather-clear-night"
-    entry = APP_DIR / "monitor-dimmer-config.desktop"
+    entry = APP_DIR / "dimmer.desktop"
     entry.write_text(f"""[Desktop Entry]
 Version=1.0
 Type=Application
 Name=Monitor Dimmer
 Comment=Configure auto-dimming of secondary screen during games or fullscreen media
-Exec=konsole --noclose -e monitor-dimmer-config
+Exec=konsole --noclose -e dimmer
 Icon={icon}
 Terminal=false
 Categories=Settings;HardwareSettings;
@@ -452,7 +452,7 @@ def add_to_kde_favorites():
     if not KDE_STATS.exists():
         return
     content = KDE_STATS.read_text()
-    entry   = "applications:monitor-dimmer-config.desktop"
+    entry   = "applications:dimmer.desktop"
     if entry in content:
         ok("Already in KDE favorites")
         return
@@ -571,7 +571,7 @@ def main():
 
   • The service starts automatically at login
   • System tray icon: look for it in your taskbar (may be hidden — click ▲)
-  • To reconfigure: run {B}monitor-dimmer-config{R}
+  • To reconfigure: run {B}dimmer{R}
   • To uninstall:   run {B}python3 {REPO_DIR}/uninstall.py{R}
 """)
 
