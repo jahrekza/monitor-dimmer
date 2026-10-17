@@ -1,55 +1,91 @@
 #!/usr/bin/env python3
 """Black overlay window on the dim target screen.
 
-Args: opacity 0.0–1.0, optional monitor model (as in right_model). Without a
-model the rightmost screen is used.
+    monitor-dimmer-overlay --opacity 0.7 [--model M] [--sn S] [--connector C]
+    monitor-dimmer-overlay --list      # print the screens as JSON
 """
-import sys
+import argparse
+import json
 import signal
+import sys
+
 from PyQt6.QtWidgets import QApplication, QWidget
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, qInstallMessageHandler
 from PyQt6.QtGui import QColor, QPainter
+
+from dimmer_common import find_target
+
+
+def screen_info(s):
+    model = s.model()
+    # KWin reports some models prefixed with the connector ("DP-2-MAG 341C")
+    if model.startswith(s.name() + "-"):
+        model = model[len(s.name()) + 1:]
+    return {"connector": s.name(), "mfg": s.manufacturer(),
+            "model": model, "sn": s.serialNumber()}
 
 
 class Overlay(QWidget):
-    # setWindowOpacity() is a no-op on Wayland, so the window is drawn
-    # translucent and painted with a semi-transparent black instead.
-    def __init__(self, opacity):
+    def __init__(self, opacity, translucent):
         super().__init__()
-        self.color = QColor(0, 0, 0, round(opacity * 255))
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool |
+            Qt.WindowType.WindowDoesNotAcceptFocus |    # don't steal the game's focus
+            Qt.WindowType.WindowTransparentForInput     # clicks reach the windows below
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        if translucent:
+            # setWindowOpacity() is a no-op on Wayland: paint translucent black
+            self.color = QColor(0, 0, 0, round(opacity * 255))
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        else:
+            self.color = QColor(0, 0, 0)
+            self.setWindowOpacity(opacity)
 
     def paintEvent(self, event):
         QPainter(self).fillRect(self.rect(), self.color)
 
 
+def quiet_activation_warning(mode, context, message):
+    # showFullScreen() asks to activate the window even though it is marked
+    # WindowDoesNotAcceptFocus; Qt warns about it on every dim
+    if "requestActivate()" not in message:
+        print(message, file=sys.stderr)
+
+
 def main():
-    opacity = float(sys.argv[1]) if len(sys.argv) > 1 else 0.7
-    model   = sys.argv[2] if len(sys.argv) > 2 else ""
+    qInstallMessageHandler(quiet_activation_warning)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--list", action="store_true")
+    ap.add_argument("--opacity", type=float, default=0.7)
+    ap.add_argument("--model")
+    ap.add_argument("--sn")
+    ap.add_argument("--connector")
+    args = ap.parse_args()
 
-    app = QApplication(sys.argv)
+    app = QApplication(sys.argv[:1])
     screens = app.screens()
-    if model:
-        # Qt sometimes prefixes the model with the connector ("DP-2-MAG 341C")
-        matches = [s for s in screens if s.model() == model
-                   or s.model().endswith("-" + model)]
-        if not matches:
-            print(f"Screen with model {model!r} not found", file=sys.stderr)
-            sys.exit(1)
-        target = matches[0]
-    else:
-        target = max(screens, key=lambda s: s.geometry().x())
+    infos = [screen_info(s) for s in screens]
 
-    w = Overlay(opacity)
-    w.setWindowFlags(
-        Qt.WindowType.FramelessWindowHint |
-        Qt.WindowType.WindowStaysOnTopHint |
-        Qt.WindowType.Tool
-    )
+    if args.list:
+        print(json.dumps(infos))
+        return
 
-    w.show()
-    w.windowHandle().setScreen(target)
+    cfg = {"target_model": args.model, "target_sn": args.sn,
+           "target_connector": args.connector}
+    hit = find_target(cfg, infos)
+    if hit is None:
+        print("Dim target screen not found", file=sys.stderr)
+        sys.exit(1)
+    target = screens[infos.index(hit)]
+
+    w = Overlay(min(max(args.opacity, 0.0), 1.0),
+                translucent=app.platformName() != "xcb")
     w.setGeometry(target.geometry())
+    w.winId()                                   # create the native window
+    w.windowHandle().setScreen(target)
     w.showFullScreen()
 
     signal.signal(signal.SIGTERM, lambda *_: app.quit())

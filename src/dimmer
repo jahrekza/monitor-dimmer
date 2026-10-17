@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 import subprocess
-import os
-import re
+import sys
 import time
-from pathlib import Path
 
-CONFIG_FILE = Path.home() / ".config/monitor-dimmer.conf"
-OVERLAY_BIN = Path.home() / ".local/bin/monitor-dimmer-overlay"
-SERVICE     = "monitor-dimmer.service"
+import dimmer_common as dc
+
+SERVICE = "monitor-dimmer.service"
 
 RESET  = "\033[0m"
 BOLD   = "\033[1m"
@@ -18,123 +16,15 @@ RED    = "\033[91m"
 DIM    = "\033[2m"
 
 
-def load_config():
-    cfg = {
-        "dim_level":      70,
-        "poll_interval":  5,
-        "use_overlay":    True,
-        "right_bus":      None,
-        "right_mfg":      None,
-        "right_model":    None,
-        "right_sn":       None,
-        "game_paths":     [],
-        "vlc_fullscreen": True,
-    }
-    try:
-        for line in CONFIG_FILE.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            k, _, v = line.partition("=")
-            k, v = k.strip(), v.strip()
-            if k == "dim_level":
-                cfg["dim_level"] = int(v)
-            elif k == "poll_interval":
-                cfg["poll_interval"] = int(v)
-            elif k == "use_overlay":
-                cfg["use_overlay"] = v.lower() == "true"
-            elif k == "right_bus":
-                cfg["right_bus"] = int(v)
-            elif k in ("right_mfg", "right_model", "right_sn"):
-                cfg[k] = v or None
-            elif k == "game_paths":
-                cfg["game_paths"] = [p.strip() for p in v.split(",") if p.strip()]
-            elif k == "vlc_fullscreen":
-                cfg["vlc_fullscreen"] = v.lower() == "true"
-    except FileNotFoundError:
-        pass
-    return cfg
-
-
-def save_config(cfg):
-    lines = [
-        "# Monitor Dimmer configuration",
-        f"dim_level={cfg['dim_level']}",
-        f"poll_interval={cfg['poll_interval']}",
-        f"use_overlay={str(cfg['use_overlay']).lower()}",
-        f"vlc_fullscreen={str(cfg['vlc_fullscreen']).lower()}",
-    ]
-    if cfg["right_bus"] is not None:
-        lines.append(f"right_bus={cfg['right_bus']}")
-    for k in ("right_mfg", "right_model", "right_sn"):
-        if cfg[k]:
-            lines.append(f"{k}={cfg[k]}")
-    if cfg["game_paths"]:
-        lines.append(f"game_paths={','.join(cfg['game_paths'])}")
-    CONFIG_FILE.write_text("\n".join(lines) + "\n")
-
-
-def detect_displays():
-    """Return the DDC-capable monitors as [{bus, mfg, model, sn}]."""
-    try:
-        out = subprocess.run(["ddcutil", "detect"], capture_output=True,
-                             text=True, timeout=30).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    displays, current = [], None
-    for line in out.splitlines():
-        if re.match(r"^Display \d+", line):
-            current = {}
-            displays.append(current)
-        elif re.match(r"^\S", line):
-            current = None
-        elif current is None:
-            continue
-        elif "I2C bus:" in line:
-            m = re.search(r"/dev/i2c-(\d+)", line)
-            if m:
-                current["bus"] = int(m.group(1))
-        elif "Mfg id:" in line:
-            current["mfg"] = line.split(":", 1)[1].split(" - ")[0].strip()
-        elif "Model:" in line:
-            current["model"] = line.split(":", 1)[1].strip()
-        elif "Serial number:" in line:
-            current["sn"] = line.split(":", 1)[1].strip()
-    return [d for d in displays if "bus" in d]
-
-
-def find_dim_bus(cfg, displays=None):
-    """Same lookup as the daemon: serial, then mfg + model, then legacy bus."""
-    if not (cfg["right_sn"] or cfg["right_model"]):
-        return cfg["right_bus"]
-    if displays is None:
-        displays = detect_displays()
-    if cfg["right_sn"]:
-        for d in displays:
-            if d.get("sn") == cfg["right_sn"]:
-                return d["bus"]
-    if cfg["right_model"]:
-        matches = [d for d in displays
-                   if d.get("model") == cfg["right_model"]
-                   and (not cfg["right_mfg"] or d.get("mfg") == cfg["right_mfg"])]
-        if len(matches) == 1:
-            return matches[0]["bus"]
-    return None
-
-
-def target_label(cfg):
-    name = f"{cfg['right_mfg'] or ''} {cfg['right_model'] or ''}".strip()
-    if not name:
-        return f"i2c-{cfg['right_bus']}" if cfg["right_bus"] is not None else "not set"
-    return name
-
-
 def service_status():
-    r = subprocess.run(
-        ["systemctl", "--user", "is-active", SERVICE],
-        capture_output=True, text=True
-    )
-    return r.stdout.strip()
+    try:
+        r = subprocess.run(
+            ["systemctl", "--user", "is-active", SERVICE],
+            capture_output=True, text=True
+        )
+        return r.stdout.strip()
+    except OSError:
+        return "unknown"
 
 
 def ask_int(prompt, min_val, max_val, default):
@@ -163,64 +53,71 @@ def print_status(cfg):
     mode   = (f"{CYAN}overlay{RESET} (black window)"
               if cfg["use_overlay"] else f"{YELLOW}dim{RESET} (hardware brightness)")
     vlc    = f"{GREEN}yes{RESET}" if cfg["vlc_fullscreen"] else f"{DIM}no{RESET}"
+    fs     = f"{GREEN}yes{RESET}" if cfg["require_fullscreen"] else f"{DIM}no{RESET}"
     paths  = len(cfg["game_paths"])
 
     print(f"  Service status:     {dot} {status}")
     print(f"  Dim method:         {mode}")
-    print(f"  Dim target:         {YELLOW}{target_label(cfg)}{RESET}")
+    print(f"  Dim target:         {YELLOW}{dc.target_label(cfg)}{RESET}")
     print(f"  Dim intensity:      {YELLOW}{cfg['dim_level']}%{RESET}  {DIM}(0=none, 100=black){RESET}")
     print(f"  Poll interval:      {YELLOW}{cfg['poll_interval']}s{RESET}")
     print(f"  VLC fullscreen:     {vlc}")
+    print(f"  Fullscreen only:    {fs}  {DIM}(dim only while the game is fullscreen){RESET}")
     print(f"  Game paths:         {YELLOW}{paths}{RESET} configured")
     print()
 
 
 def menu_test_dim(cfg):
+    """Returns True if the dim worked."""
     print(f"\n{YELLOW}▸ Testing dim for 3 seconds...{RESET}")
     if cfg["use_overlay"]:
-        proc = subprocess.Popen(
-            ["python3", str(OVERLAY_BIN), str(cfg["dim_level"] / 100),
-             cfg["right_model"] or ""]
-        )
+        if not dc.has_target(cfg):
+            print(f"{RED}  No dim target — choose a monitor first{RESET}")
+            return False
+        cmd = [sys.executable, str(dc.OVERLAY_BIN), "--opacity", str(cfg["dim_level"] / 100)]
+        for flag, key in (("--model", "target_model"), ("--sn", "target_sn"),
+                          ("--connector", "target_connector")):
+            if cfg[key]:
+                cmd += [flag, cfg[key]]
+        proc = subprocess.Popen(cmd)
         time.sleep(3)
         proc.terminate()
+        if proc.wait() != 0:
+            print(f"{RED}  Dim target screen not found — choose it again{RESET}")
+            return False
     else:
-        bus    = find_dim_bus(cfg)
-        target = 100 - cfg["dim_level"]
-        if bus is not None:
-            subprocess.run(
-                ["ddcutil", "setvcp", "10", str(target), "--bus", str(bus)],
-                capture_output=True
-            )
-            time.sleep(3)
-            subprocess.run(
-                ["ddcutil", "setvcp", "10", "100", "--bus", str(bus)],
-                capture_output=True
-            )
-        else:
-            print(f"{RED}  Dim target monitor not found — choose it again{RESET}")
-            return
+        bus   = dc.find_target_bus(cfg)
+        level = dc.get_brightness(bus) if bus is not None else None
+        if level is None:
+            print(f"{RED}  Dim target not reachable via ddcutil — choose it again{RESET}")
+            return False
+        current, _max = level
+        dc.set_brightness(bus, dc.dimmed_value(current, cfg["dim_level"]))
+        time.sleep(3)
+        dc.set_brightness(bus, current)
     print(f"{GREEN}✓ Done.{RESET}")
+    return True
 
 
 def menu_pick_monitor(cfg):
     print(f"{DIM}  Detecting monitors...{RESET}")
-    displays = detect_displays()
-    if not displays:
-        print(f"{RED}  No monitors detected via ddcutil{RESET}")
+    monitors = dc.all_monitors()
+    if not cfg["use_overlay"]:
+        monitors = [m for m in monitors if m.get("bus") is not None]
+        if not monitors:
+            print(f"{RED}  No DDC/CI monitors found — use overlay mode, "
+                  f"or check `ddcutil detect`{RESET}")
+            return
+    if not monitors:
+        print(f"{RED}  No monitors detected{RESET}")
         return
-    current = find_dim_bus(cfg, displays)
-    for i, d in enumerate(displays, 1):
-        mark = f"  {GREEN}← current{RESET}" if d["bus"] == current else ""
-        print(f"  {BOLD}{i}{RESET}  {d.get('mfg', '')} {d.get('model', '')}"
-              f"  {DIM}(i2c-{d['bus']}){RESET}{mark}")
-    idx = ask_int("\n  Monitor to dim", 1, len(displays), 1) - 1
-    d = displays[idx]
-    cfg["right_bus"]   = d["bus"]
-    cfg["right_mfg"]   = d.get("mfg") or None
-    cfg["right_model"] = d.get("model") or None
-    cfg["right_sn"]    = d.get("sn") or None
-    print(f"{GREEN}✓ Dim target: {target_label(cfg)}{RESET}")
+    current = dc.find_target(cfg, monitors)
+    for i, m in enumerate(monitors, 1):
+        mark = f"  {GREEN}← current{RESET}" if m is current else ""
+        print(f"  {BOLD}{i}{RESET}  {dc.monitor_label(m)}{mark}")
+    idx = ask_int("\n  Monitor to dim", 1, len(monitors), 1) - 1
+    dc.set_target(cfg, monitors[idx])
+    print(f"{GREEN}✓ Dim target: {dc.target_label(cfg)}{RESET}")
 
 
 def menu_start_service():
@@ -240,14 +137,15 @@ def menu_stop_service():
 
 
 def apply_config(cfg):
-    save_config(cfg)
-    subprocess.run(["systemctl", "--user", "restart", SERVICE])
+    dc.save_config(cfg)
+    if service_status() == "active":
+        subprocess.run(["systemctl", "--user", "restart", SERVICE])
     print(f"\n{GREEN}✓ Saved and applied.{RESET}")
 
 
 def main():
     print_header()
-    cfg = load_config()
+    cfg = dc.load_config()
 
     while True:
         print_status(cfg)
@@ -255,16 +153,19 @@ def main():
                       if cfg["use_overlay"] else "Switch to overlay (black window)")
         vlc_label  = ("Disable VLC fullscreen detection"
                       if cfg["vlc_fullscreen"] else "Enable VLC fullscreen detection")
+        fs_label   = ("Dim whenever a game runs"
+                      if cfg["require_fullscreen"] else "Dim only while a game is fullscreen")
 
         print(f"  {BOLD}1{RESET}  Change dim intensity     ({cfg['dim_level']}%)")
         print(f"  {BOLD}2{RESET}  Change poll interval     ({cfg['poll_interval']}s)")
         print(f"  {BOLD}3{RESET}  Test dim")
         print(f"  {BOLD}4{RESET}  {mode_label}")
         print(f"  {BOLD}5{RESET}  {vlc_label}")
-        print(f"  {BOLD}6{RESET}  Choose monitor to dim   ({target_label(cfg)})")
-        print(f"  {BOLD}7{RESET}  Start service")
-        print(f"  {BOLD}8{RESET}  Stop service")
-        print(f"  {BOLD}9{RESET}  Save and exit")
+        print(f"  {BOLD}6{RESET}  {fs_label}")
+        print(f"  {BOLD}7{RESET}  Choose monitor to dim    ({dc.target_label(cfg)})")
+        print(f"  {BOLD}8{RESET}  Start service")
+        print(f"  {BOLD}9{RESET}  Stop service")
+        print(f"  {BOLD}s{RESET}  Save and exit")
         print(f"  {BOLD}q{RESET}  Quit without saving\n")
 
         choice = input(f"{CYAN}Choose option: {RESET}").strip().lower()
@@ -282,17 +183,27 @@ def main():
             cfg["use_overlay"] = not cfg["use_overlay"]
             mode = "overlay (black window)" if cfg["use_overlay"] else "dim (hardware brightness)"
             print(f"{GREEN}✓ Switched to: {mode}{RESET}")
+            if not cfg["use_overlay"] and dc.find_target_bus(cfg) is None:
+                print(f"{YELLOW}  The current target has no DDC/CI — choose a monitor (7){RESET}")
         elif choice == "5":
             cfg["vlc_fullscreen"] = not cfg["vlc_fullscreen"]
             state = "enabled" if cfg["vlc_fullscreen"] else "disabled"
             print(f"{GREEN}✓ VLC fullscreen detection {state}.{RESET}")
         elif choice == "6":
-            menu_pick_monitor(cfg)
+            cfg["require_fullscreen"] = not cfg["require_fullscreen"]
+            state = "only while fullscreen" if cfg["require_fullscreen"] else "whenever a game runs"
+            print(f"{GREEN}✓ Dimming {state}.{RESET}")
+            if cfg["require_fullscreen"]:
+                print(f"{DIM}  Sees X11/XWayland windows only (via xdotool + xprop): native{RESET}")
+                print(f"{DIM}  Wayland games never count as fullscreen, so leave this off for them.{RESET}")
+                print(f"{DIM}  Without xdotool/xprop every game counts as fullscreen.{RESET}")
         elif choice == "7":
-            menu_start_service()
+            menu_pick_monitor(cfg)
         elif choice == "8":
-            menu_stop_service()
+            menu_start_service()
         elif choice == "9":
+            menu_stop_service()
+        elif choice == "s":
             apply_config(cfg)
             break
         elif choice == "q":
@@ -303,7 +214,9 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--test" in sys.argv[1:]:                # used by install.py
+        sys.exit(0 if menu_test_dim(dc.load_config()) else 1)
     try:
         main()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, EOFError):
         print(f"\n{DIM}Cancelled.{RESET}\n")

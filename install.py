@@ -2,7 +2,7 @@
 """
 Monitor Dimmer — Installer
 Automatically dims your secondary monitor during gaming or fullscreen media.
-https://github.com/YOUR_USERNAME/monitor-dimmer
+https://github.com/jahrekza/monitor-dimmer
 """
 
 import os
@@ -20,7 +20,9 @@ HOME        = Path.home()
 REPO_DIR    = Path(__file__).parent.resolve()
 SRC_DIR     = REPO_DIR / "src"
 BIN_DIR     = HOME / ".local/bin"
-CONFIG_FILE = HOME / ".config/monitor-dimmer.conf"
+APP_HOME    = HOME / ".local/share/monitor-dimmer"
+VENV_DIR    = APP_HOME / "venv"
+VENV_PY     = VENV_DIR / "bin/python"
 SERVICE_DIR = HOME / ".config/systemd/user"
 APP_DIR     = HOME / ".local/share/applications"
 ICONS_DIR   = HOME / ".local/share/icons"
@@ -30,7 +32,11 @@ SVG_SRC     = REPO_DIR / "assets/monitor-dimmer-symbolic.svg"
 SVG_DEST    = ICONS_DIR / "hicolor/scalable/apps/monitor-dimmer-symbolic.svg"
 KDE_STATS   = HOME / ".config/kactivitymanagerd-statsrc"
 
-SCRIPTS = ["monitor-dimmer", "monitor-dimmer-overlay", "dimmer"]
+PROGRAMS = ["monitor-dimmer", "monitor-dimmer-overlay", "dimmer"]
+MODULES  = ["dimmer_common.py"]
+
+sys.path.insert(0, str(SRC_DIR))
+import dimmer_common as dc  # noqa: E402
 
 # ── Colors ───────────────────────────────────────────────────────────────────
 
@@ -112,238 +118,264 @@ def ask_choice(prompt, options):
 
 
 def run(cmd, **kwargs):
-    return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+    """subprocess.run that reports a missing program instead of crashing."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(cmd, 127, "", f"{cmd[0]}: not found")
 
 # ── Dependency check ──────────────────────────────────────────────────────────
 
-DISTRO_HINTS = {
-    "arch":   "sudo pacman -S {pkg}",
-    "debian": "sudo apt install {pkg}",
-    "fedora": "sudo dnf install {pkg}",
+INSTALL_CMD = {
+    "arch":     "sudo pacman -S {pkg}",
+    "debian":   "sudo apt install {pkg}",
+    "fedora":   "sudo dnf install {pkg}",
+    "suse":     "sudo zypper install {pkg}",
 }
 
-PKG_MAP = {
-    "arch":   {"ddcutil": "ddcutil", "PyQt6": "python-pyqt6",
-               "PIL": "python-pillow", "pystray": None,
-               "libappindicator": "libappindicator-gtk3"},
-    "debian": {"ddcutil": "ddcutil", "PyQt6": "python3-pyqt6",
-               "PIL": "python3-pil", "pystray": None,
-               "libappindicator": "gir1.2-appindicator3-0.1"},
-    "fedora": {"ddcutil": "ddcutil", "PyQt6": "python3-pyqt6",
-               "PIL": "python3-pillow", "pystray": None,
-               "libappindicator": "libappindicator-gtk3"},
+SYSTEM_PKGS = {
+    "arch":   {"ddcutil": "ddcutil", "xdotool": "xdotool", "xprop": "xorg-xprop",
+               "gdbus": "glib2", "venv": "python", "PyQt6": "python-pyqt6",
+               "appindicator": "libappindicator-gtk3"},
+    "debian": {"ddcutil": "ddcutil", "xdotool": "xdotool", "xprop": "x11-utils",
+               "gdbus": "libglib2.0-bin", "venv": "python3-venv", "PyQt6": "python3-pyqt6",
+               "appindicator": "gir1.2-ayatanaappindicator3-0.1"},
+    "fedora": {"ddcutil": "ddcutil", "xdotool": "xdotool", "xprop": "xprop",
+               "gdbus": "glib2", "venv": "python3", "PyQt6": "python3-pyqt6",
+               "appindicator": "libappindicator-gtk3"},
+    "suse":   {"ddcutil": "ddcutil", "xdotool": "xdotool", "xprop": "xprop",
+               "gdbus": "glib2-tools", "venv": "python3", "PyQt6": "python3-PyQt6",
+               "appindicator": "typelib-1_0-AppIndicator3-0_1"},
 }
 
 
 def detect_distro():
+    fields = {}
     try:
-        text = Path("/etc/os-release").read_text()
-        if "arch" in text.lower() or "cachyos" in text.lower() or "manjaro" in text.lower():
-            return "arch"
-        if "debian" in text.lower() or "ubuntu" in text.lower():
-            return "debian"
-        if "fedora" in text.lower() or "bazzite" in text.lower() or "nobara" in text.lower():
-            return "fedora"
+        for line in Path("/etc/os-release").read_text().splitlines():
+            k, _, v = line.partition("=")
+            fields[k] = v.strip().strip('"').lower()
     except FileNotFoundError:
-        pass
+        return "unknown"
+    ids = [fields.get("ID", "")] + fields.get("ID_LIKE", "").split()
+    families = {"arch": "arch", "debian": "debian", "ubuntu": "debian",
+                "fedora": "fedora", "rhel": "fedora", "suse": "suse"}
+    for i in ids:
+        for key, family in families.items():
+            if key in i:
+                return family
     return "unknown"
 
 
-def check_dependencies():
-    step("Checking dependencies")
-    distro  = detect_distro()
+def install_hint(distro, keys):
+    pkgs = [SYSTEM_PKGS.get(distro, {}).get(k, k) for k in keys]
+    return INSTALL_CMD.get(distro, "install: {pkg}").format(pkg=" ".join(pkgs))
+
+
+def check_system_tools(distro):
+    step("Checking system tools")
+    optional = [
+        ("ddcutil", "ddcutil", "hardware brightness mode (DDC/CI)"),
+        ("gdbus",   "gdbus",   "VLC fullscreen detection"),
+        ("xdotool", "xdotool", "\"dim only while fullscreen\" option"),
+        ("xprop",   "xprop",   "\"dim only while fullscreen\" option"),
+    ]
     missing = []
-
-    # ddcutil
-    if shutil.which("ddcutil"):
-        ok("ddcutil")
-    else:
-        err("ddcutil — not found")
-        missing.append("ddcutil")
-
-    # Python packages
-    for name, import_name in [("pystray", "pystray"), ("Pillow", "PIL"), ("PyQt6", "PyQt6")]:
-        try:
-            __import__(import_name)
-            ok(f"python {name}")
-        except ImportError:
-            err(f"python {name} — not found")
-            missing.append(name)
-
-    # AppIndicator (for system tray)
-    try:
-        import gi
-        gi.require_version("AppIndicator3", "0.1")
-        from gi.repository import AppIndicator3  # noqa: F401
-        ok("libappindicator3")
-    except Exception:
-        warn("libappindicator3 — tray icon may not work on some desktops")
-
+    for key, binary, purpose in optional:
+        if shutil.which(binary):
+            ok(binary)
+        else:
+            warn(f"{binary} — not found {D}(needed for {purpose}){R}")
+            missing.append(key)
     if missing:
-        print(f"\n  {Y}Some dependencies are missing.{R}")
-
-        pip_pkgs = [p for p in missing if p in ("pystray", "Pillow", "PyQt6")]
-        sys_pkgs = [p for p in missing if p not in pip_pkgs]
-
-        if pip_pkgs:
-            if ask_yes_no(f"Install {', '.join(pip_pkgs)} via pip?"):
-                subprocess.run([sys.executable, "-m", "pip", "install", "--user"] + pip_pkgs)
-
-        if sys_pkgs:
-            pkgs = PKG_MAP.get(distro, {})
-            names = [pkgs.get(p, p) for p in sys_pkgs]
-            hint  = DISTRO_HINTS.get(distro, "install {pkg}").format(pkg=" ".join(names))
-            print(f"\n  {Y}Please install manually:{R}")
-            print(f"    {B}{hint}{R}")
-            if not ask_yes_no("Continue anyway?", default=False):
-                sys.exit(1)
-
-    return True
-
-# ── Monitor detection ─────────────────────────────────────────────────────────
-
-def detect_monitors():
-    result = run(["ddcutil", "detect"])
-    monitors = []
-    current  = {}
-
-    for line in result.stdout.splitlines():
-        if re.match(r"^Display \d+", line):
-            if current.get("bus") is not None:
-                monitors.append(current)
-            current = {}
-        elif "I2C bus:" in line:
-            m = re.search(r"/dev/i2c-(\d+)", line)
-            if m:
-                current["bus"] = int(m.group(1))
-        elif "DRM connector:" in line:
-            current["connector"] = line.split(":", 1)[-1].strip()
-        elif "Model:" in line:
-            current["model"] = line.split(":", 1)[-1].strip()
-        elif "Mfg id:" in line:
-            raw = line.split(":", 1)[-1].strip()
-            current["mfg"] = raw.split(" - ")[-1].strip() if " - " in raw else raw
-            current["mfg_id"] = raw.split(" - ")[0].strip()
-        elif "Serial number:" in line:
-            current["sn"] = line.split(":", 1)[-1].strip()
-
-    if current.get("bus") is not None:
-        monitors.append(current)
-
-    return monitors
+        print(f"\n  {D}Optional — install with:{R} {B}{install_hint(distro, missing)}{R}")
+    if not shutil.which("systemctl"):
+        err("systemctl not found — the daemon runs as a systemd user service")
+        sys.exit(1)
 
 
-def monitor_label(m):
-    name = f"{m.get('mfg', '')} {m.get('model', '')}".strip() or "Unknown Monitor"
-    return f"{name}  {D}({m.get('connector', '?')}, i2c-{m['bus']}){R}"
+def venv_has(module):
+    return run([str(VENV_PY), "-c", f"import {module}"]).returncode == 0
 
 
-def pick_monitors():
-    step("Detecting monitors")
-    monitors = detect_monitors()
+def setup_venv(distro):
+    """Private virtualenv for pystray/Pillow, so nothing touches the system
+    Python (pip --user is refused on PEP 668 distros). It sees system site
+    packages for PyGObject and PyQt6, which are best installed from the distro."""
+    step("Setting up Python environment")
+    if not VENV_PY.exists():
+        APP_HOME.mkdir(parents=True, exist_ok=True)
+        r = run([sys.executable, "-m", "venv", "--system-site-packages", str(VENV_DIR)])
+        if r.returncode != 0:
+            err("Could not create a Python virtual environment")
+            print(f"  {D}{r.stderr.strip()}{R}")
+            print(f"  Install venv support: {B}{install_hint(distro, ['venv'])}{R}")
+            sys.exit(1)
+    ok(f"Virtual environment: {VENV_DIR}")
 
+    pip_pkgs = [pkg for pkg, mod in (("pystray", "pystray"), ("Pillow", "PIL"))
+                if not venv_has(mod)]
+    if not venv_has("PyQt6"):
+        warn("PyQt6 not found (needed for the overlay and monitor list)")
+        print(f"  {D}Best from your distro: {install_hint(distro, ['PyQt6'])}{R}")
+        if ask_yes_no("Install PyQt6 into the environment with pip instead (~80 MB)?"):
+            pip_pkgs.append("PyQt6")
+    if pip_pkgs:
+        print(f"  {D}Installing {', '.join(pip_pkgs)}...{R}")
+        r = run([str(VENV_PY), "-m", "pip", "install", "--quiet", "--upgrade", *pip_pkgs])
+        if r.returncode != 0:
+            err("pip install failed")
+            print(f"  {D}{r.stderr.strip()[-800:]}{R}")
+            sys.exit(1)
+    for name, mod in (("pystray", "pystray"), ("Pillow", "PIL"), ("PyQt6", "PyQt6")):
+        if venv_has(mod):
+            ok(f"python {name}")
+        else:
+            warn(f"python {name} — missing")
+
+    indicator = any(run([str(VENV_PY), "-c",
+                         f"import gi; gi.require_version('{lib}', '0.1')"]).returncode == 0
+                    for lib in ("AppIndicator3", "AyatanaAppIndicator3"))
+    if indicator:
+        ok("AppIndicator (tray icon)")
+    else:
+        warn("AppIndicator not found — the tray icon may not show; the daemon works without it")
+        print(f"  {D}{install_hint(distro, ['appindicator'])}{R}")
+    return indicator
+
+# ── Monitor selection ─────────────────────────────────────────────────────────
+
+def pick_monitor(use_overlay):
+    step("Choosing the monitor to dim")
+    monitors = dc.all_monitors(python=str(VENV_PY))
+    if not use_overlay:
+        monitors = [m for m in monitors if m.get("bus") is not None]
+        if not monitors:
+            err("No monitor answers DDC/CI (`ddcutil detect`).")
+            print(f"  {D}Check that ddcutil is installed and you can access /dev/i2c-*"
+                  f" (often: sudo usermod -aG i2c $USER, then log out and in).{R}")
+            print(f"  {D}Or re-run the installer and choose the overlay method.{R}")
+            sys.exit(1)
     if not monitors:
-        err("No monitors detected via ddcutil.")
-        print(f"  {D}Make sure you are in the 'i2c' group: sudo usermod -aG i2c $USER{R}")
+        err("No monitors detected — run the installer from your desktop session.")
         sys.exit(1)
 
     if len(monitors) == 1:
         warn("Only one monitor detected — dimming will affect your only screen.")
         if not ask_yes_no("Continue?", default=False):
             sys.exit(0)
-        return None, monitors[0]
-
-    print(f"  Found {len(monitors)} monitors:\n")
-    for i, m in enumerate(monitors, 1):
-        print(f"    {B}{i}{R}  {monitor_label(m)}")
-
-    print()
-    primary_idx = ask_choice(
-        "Which is your PRIMARY monitor? (gaming/media — the one you look at)",
-        [(monitor_label(m), "") for m in monitors]
-    )
-
-    secondary_idx = ask_choice(
-        "Which monitor should be AUTO-DIMMED?",
-        [(monitor_label(m), "← will be dimmed during games/media")
-         if i != primary_idx else (monitor_label(m), "← primary (selected above)")
-         for i, m in enumerate(monitors)]
-    )
-
-    ok(f"Primary:  {monitor_label(monitors[primary_idx])}")
-    ok(f"Dim target: {monitor_label(monitors[secondary_idx])}")
-    return monitors[primary_idx], monitors[secondary_idx]
+        target = monitors[0]
+    else:
+        idx = ask_choice(
+            "Which monitor should be AUTO-DIMMED? (not the one you play on)",
+            [(dc.monitor_label(m), "") for m in monitors]
+        )
+        target = monitors[idx]
+    ok(f"Dim target: {dc.monitor_label(target)}")
+    return target
 
 # ── Game path detection ───────────────────────────────────────────────────────
 
+STEAM_ROOTS = [
+    HOME / ".steam/steam",
+    HOME / ".local/share/Steam",
+    HOME / ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+]
+
+HEROIC_CONFIGS = [
+    HOME / ".config/heroic/config.json",
+    HOME / ".var/app/com.heroicgameslauncher.hgl/config/heroic/config.json",
+]
+
+
+def steam_libraries():
+    libs = []
+    for root in STEAM_ROOTS:
+        vdf = root / "steamapps/libraryfolders.vdf"
+        dirs = [root]
+        if vdf.exists():
+            dirs += [Path(p) for p in re.findall(r'"path"\s+"([^"]+)"', vdf.read_text(errors="ignore"))]
+        for d in dirs:
+            common = d / "steamapps/common"
+            if common.is_dir():
+                libs.append(common)
+    return libs
+
+
 def detect_game_paths():
-    paths = []
+    found, seen = [], set()
 
-    steam = HOME / ".steam/steam/steamapps/common"
-    if steam.exists():
-        paths.append(("Steam", str(steam)))
+    def add(label, path):
+        real = os.path.realpath(path)
+        if real not in seen and Path(path).is_dir():
+            seen.add(real)
+            found.append((label, str(path)))
 
-    heroic_cfg = HOME / ".var/app/com.heroicgameslauncher.hgl/config/heroic/config.json"
-    if heroic_cfg.exists():
+    for lib in steam_libraries():
+        add("Steam library", lib)
+
+    for cfg in HEROIC_CONFIGS:
         try:
-            data = json.loads(heroic_cfg.read_text())
+            data = json.loads(cfg.read_text())
             p = data.get("defaultSettings", {}).get("defaultInstallPath")
-            if p and Path(p).exists():
-                paths.append(("Heroic (GOG/Epic)", p))
-        except Exception:
+            if p:
+                add("Heroic (GOG/Epic)", Path(p).expanduser())
+        except (OSError, ValueError):
             pass
-
-    heroic_default = HOME / "Games/Heroic"
-    if heroic_default.exists() and not any("Heroic" in label for label, _ in paths):
-        paths.append(("Heroic (GOG/Epic)", str(heroic_default)))
-
-    return paths
+    add("Heroic (GOG/Epic)", HOME / "Games/Heroic")
+    return found
 
 
 def pick_game_paths():
     step("Detecting game libraries")
+    print(f"  {D}Steam games are recognised automatically; library folders also catch{R}")
+    print(f"  {D}native games and games started from other launchers.{R}\n")
     found = detect_game_paths()
     chosen = []
 
     if not found:
         warn("No game libraries detected automatically.")
-        custom = input("  Enter custom path (or leave empty to skip): ").strip()
-        if custom and Path(custom).exists():
-            chosen.append(custom)
-        return chosen
 
     for label, path in found:
         ok(f"{label}: {D}{path}{R}")
-        if ask_yes_no(f"Include {label}?"):
+        if ask_yes_no(f"Include {path}?"):
             chosen.append(path)
 
-    custom = input(f"\n  {D}Add a custom game path? (leave empty to skip){R}: ").strip()
-    if custom and Path(custom).exists():
-        chosen.append(custom)
-    elif custom:
-        warn(f"Path not found, skipping: {custom}")
+    while True:
+        custom = input(f"\n  {D}Add a custom game path? (leave empty to skip){R}: ").strip()
+        if not custom:
+            break
+        if "," in custom:
+            warn("Paths containing commas are not supported, skipping")
+        elif Path(custom).expanduser().is_dir():
+            chosen.append(str(Path(custom).expanduser()))
+        else:
+            warn(f"Path not found, skipping: {custom}")
 
     return chosen
 
 # ── Settings wizard ───────────────────────────────────────────────────────────
 
-def pick_settings():
-    step("Dimming settings")
-
+def pick_method():
+    step("Dimming method")
+    has_ddc = shutil.which("ddcutil") is not None
     method_idx = ask_choice(
         "How should the screen be dimmed?",
         [
-            ("Black overlay",        "recommended — no flicker, can go fully black"),
-            ("Hardware brightness",  "changes monitor brightness via DDC/CI"),
+            ("Black overlay",        "recommended — works on any screen, can go fully black"),
+            ("Hardware brightness",  "changes monitor brightness via DDC/CI"
+                                     + ("" if has_ddc else " (needs ddcutil)")),
         ]
     )
-    use_overlay = method_idx == 0
+    return method_idx == 0
 
-    print()
+
+def pick_settings(use_overlay):
+    step("Dimming settings")
     if use_overlay:
         print(f"  {D}0 = invisible, 50 = semi-transparent, 100 = fully black{R}")
     else:
-        print(f"  {D}0 = no change, 50 = half brightness, 100 = pitch black{R}")
+        print(f"  {D}0 = no change, 50 = half of your brightness, 100 = pitch black{R}")
     dim_level = ask_int("Dim intensity (0–100)", 0, 100, 70)
 
     print()
@@ -353,32 +385,24 @@ def pick_settings():
     print()
     vlc = ask_yes_no("Detect VLC in fullscreen?")
 
+    print()
+    print(f"  {D}Off: dim whenever a game runs. On: only while it is fullscreen —{R}")
+    print(f"  {D}X11/XWayland games only, native Wayland games are never detected.{R}")
+    fullscreen = ask_yes_no("Dim only while the game is fullscreen?", default=False)
+
     return {
-        "use_overlay":    use_overlay,
-        "dim_level":      dim_level,
-        "poll_interval":  poll,
-        "vlc_fullscreen": vlc,
+        "use_overlay":        use_overlay,
+        "dim_level":          dim_level,
+        "poll_interval":      poll,
+        "vlc_fullscreen":     vlc,
+        "require_fullscreen": fullscreen,
     }
 
 # ── Installation ──────────────────────────────────────────────────────────────
 
 def write_config(cfg):
-    lines = [
-        "# Monitor Dimmer configuration — generated by install.py",
-        f"dim_level={cfg['dim_level']}",
-        f"poll_interval={cfg['poll_interval']}",
-        f"use_overlay={str(cfg['use_overlay']).lower()}",
-        f"vlc_fullscreen={str(cfg['vlc_fullscreen']).lower()}",
-    ]
-    if cfg.get("right_bus") is not None:
-        lines.append(f"right_bus={cfg['right_bus']}")
-    for k in ("right_mfg", "right_model", "right_sn"):
-        if cfg.get(k):
-            lines.append(f"{k}={cfg[k]}")
-    if cfg.get("game_paths"):
-        lines.append(f"game_paths={','.join(cfg['game_paths'])}")
-    CONFIG_FILE.write_text("\n".join(lines) + "\n")
-    ok(f"Config written to {CONFIG_FILE}")
+    dc.save_config(cfg)
+    ok(f"Config written to {dc.CONFIG_FILE}")
 
 
 def install_icon():
@@ -397,18 +421,26 @@ def install_icon():
 
 
 def install_scripts():
+    APP_HOME.mkdir(parents=True, exist_ok=True)
     BIN_DIR.mkdir(parents=True, exist_ok=True)
-    for name in SCRIPTS:
-        src  = SRC_DIR / name
-        dest = BIN_DIR / name
-        shutil.copy2(src, dest)
-        dest.chmod(0o755)
-        ok(f"Installed {dest}")
+    for name in PROGRAMS + MODULES:
+        shutil.copy2(SRC_DIR / name, APP_HOME / name)
+    # Launchers in ~/.local/bin run the programs with the private venv
+    for name in PROGRAMS:
+        (APP_HOME / name).chmod(0o755)
+        launcher = BIN_DIR / name
+        launcher.unlink(missing_ok=True)
+        launcher.write_text(f'#!/bin/sh\nexec "{VENV_PY}" "{APP_HOME / name}" "$@"\n')
+        launcher.chmod(0o755)
+        ok(f"Installed {launcher}")
+    if str(BIN_DIR) not in os.environ.get("PATH", "").split(":"):
+        warn(f"{BIN_DIR} is not in your PATH — run the wizard as {BIN_DIR / 'dimmer'}")
 
 
-def install_service(autostart):
+def install_service(autostart, indicator):
     SERVICE_DIR.mkdir(parents=True, exist_ok=True)
     service = SERVICE_DIR / "monitor-dimmer.service"
+    backend = "Environment=PYSTRAY_BACKEND=appindicator\n" if indicator else ""
     service.write_text(f"""[Unit]
 Description=Monitor Dimmer — auto-dim secondary screen during games/media
 After=graphical-session.target
@@ -417,10 +449,11 @@ PartOf=graphical-session.target
 [Service]
 Type=simple
 ExecStart={BIN_DIR}/monitor-dimmer
+# Put the brightness back if the daemon died while a monitor was dimmed
+ExecStopPost={BIN_DIR}/monitor-dimmer --restore
 Restart=on-failure
 RestartSec=5
-Environment=PYSTRAY_BACKEND=appindicator
-
+{backend}
 [Install]
 WantedBy=graphical-session.target
 """)
@@ -436,21 +469,23 @@ WantedBy=graphical-session.target
 
 def install_desktop_entry():
     APP_DIR.mkdir(parents=True, exist_ok=True)
-    icon = str(ICON_DEST) if ICON_DEST.exists() else "weather-clear-night"
+    icon = str(ICON_DEST) if ICON_DEST.exists() else "video-display"
     entry = APP_DIR / "dimmer.desktop"
     entry.write_text(f"""[Desktop Entry]
 Version=1.0
 Type=Application
 Name=Monitor Dimmer
 Comment=Configure auto-dimming of secondary screen during games or fullscreen media
-Exec=konsole --noclose -e dimmer
+Exec={BIN_DIR}/dimmer
 Icon={icon}
-Terminal=false
+Terminal=true
 Categories=Settings;HardwareSettings;
 Keywords=monitor;brightness;dim;gaming;
 """)
     ok(f"Desktop entry written to {entry}")
-    run(["kbuildsycoca6", "--noincremental"])
+    for tool in ("kbuildsycoca6", "kbuildsycoca5", "update-desktop-database"):
+        if shutil.which(tool):
+            run([tool] if tool.startswith("kbuild") else [tool, str(APP_DIR)])
 
 
 def add_to_kde_favorites():
@@ -471,7 +506,7 @@ def add_to_kde_favorites():
 
 
 def start_service():
-    run(["systemctl", "--user", "start", "monitor-dimmer.service"])
+    run(["systemctl", "--user", "restart", "monitor-dimmer.service"])
     time.sleep(2)
     r = run(["systemctl", "--user", "is-active", "monitor-dimmer.service"])
     if r.stdout.strip() == "active":
@@ -480,23 +515,12 @@ def start_service():
         warn("Service may not have started — check: systemctl --user status monitor-dimmer")
 
 
-def test_dim(cfg):
-    print(f"\n  {Y}Testing dim for 3 seconds — look at your secondary screen...{R}")
-    if cfg["use_overlay"]:
-        proc = subprocess.Popen(
-            ["python3", str(BIN_DIR / "monitor-dimmer-overlay"),
-             str(cfg["dim_level"] / 100), cfg.get("right_model") or ""]
-        )
-        time.sleep(3)
-        proc.terminate()
-    else:
-        bus    = cfg.get("right_bus")
-        target = 100 - cfg["dim_level"]
-        if bus:
-            run(["ddcutil", "setvcp", "10", str(target), "--bus", str(bus)])
-            time.sleep(3)
-            run(["ddcutil", "setvcp", "10", "100", "--bus", str(bus)])
-    print(f"  {G}Done.{R}")
+def test_dim():
+    print(f"\n  {Y}Testing dim for 3 seconds — look at the dim target...{R}")
+    r = run([str(BIN_DIR / "dimmer"), "--test"])
+    print(r.stdout, end="")
+    if r.returncode != 0:
+        warn("Test failed — run `dimmer` and use \"Test dim\" to investigate")
 
 # ── Summary & main ────────────────────────────────────────────────────────────
 
@@ -504,14 +528,16 @@ def print_summary(cfg):
     method = "Black overlay" if cfg["use_overlay"] else "Hardware (ddcutil)"
     paths  = "\n".join(f"    • {p}" for p in cfg.get("game_paths", [])) or "    (none)"
     vlc    = "yes (fullscreen only)" if cfg["vlc_fullscreen"] else "no"
+    fs     = "only while fullscreen" if cfg["require_fullscreen"] else "whenever a game runs"
 
     print(f"""
 {B}Installation summary:{R}
   Dim method:      {method}
+  Dim target:      {dc.target_label(cfg)}
   Dim intensity:   {cfg['dim_level']}%
+  Dim when:        {fs}
   Poll interval:   {cfg['poll_interval']}s
   VLC detection:   {vlc}
-  Dim target:      {cfg.get('right_mfg') or ''} {cfg.get('right_model') or ''} (i2c-{cfg.get('right_bus', '?')})
   Game paths:
 {paths}
 """)
@@ -519,30 +545,25 @@ def print_summary(cfg):
 
 def main():
     banner()
+    distro = detect_distro()
 
     # 1. Dependencies
-    check_dependencies()
+    check_system_tools(distro)
+    indicator = setup_venv(distro)
 
-    # 2. Monitor selection
-    _primary, dim_target = pick_monitors()
+    # 2. Method and monitor
+    use_overlay = pick_method()
+    target = pick_monitor(use_overlay)
 
     # 3. Game paths
     game_paths = pick_game_paths()
 
     # 4. Settings
-    settings = pick_settings()
+    settings = pick_settings(use_overlay)
 
     # 5. Build final config
-    cfg = {
-        **settings,
-        # The bus number follows the GPU port; the daemon finds the monitor
-        # by serial / mfg + model so swapped cables don't move the dim.
-        "right_bus":   dim_target["bus"],
-        "right_mfg":   dim_target.get("mfg_id") or None,
-        "right_model": dim_target.get("model") or None,
-        "right_sn":    dim_target.get("sn") or None,
-        "game_paths": game_paths,
-    }
+    cfg = dict(dc.DEFAULTS, **settings, game_paths=game_paths)
+    dc.set_target(cfg, target)
 
     # 6. Summary + confirm
     print_summary(cfg)
@@ -559,7 +580,7 @@ def main():
     install_icon()
     write_config(cfg)
     install_scripts()
-    install_service(autostart)
+    install_service(autostart, indicator)
     install_desktop_entry()
 
     # 9. KDE favorites (optional)
@@ -574,7 +595,7 @@ def main():
 
     # 11. Test
     if ask_yes_no("\nRun a quick dim test now?"):
-        test_dim(cfg)
+        test_dim()
 
     print(f"""
 {G}{B}✓ Installation complete!{R}
@@ -589,6 +610,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, EOFError):
         print(f"\n\n  {D}Installation cancelled.{R}\n")
         sys.exit(0)

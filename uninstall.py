@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Monitor Dimmer — Uninstaller"""
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -13,7 +14,14 @@ FILES = [
     HOME / ".local/bin/dimmer",
     HOME / ".config/systemd/user/monitor-dimmer.service",
     HOME / ".local/share/applications/dimmer.desktop",
+    HOME / ".local/share/icons/monitor-dimmer.png",
+    HOME / ".local/share/icons/hicolor/scalable/apps/monitor-dimmer-symbolic.svg",
     HOME / ".config/monitor-dimmer.conf",
+]
+
+DIRS = [
+    HOME / ".local/share/monitor-dimmer",       # programs + private venv
+    HOME / ".local/state/monitor-dimmer",
 ]
 
 def ask_yes_no(prompt, default=True):
@@ -22,22 +30,35 @@ def ask_yes_no(prompt, default=True):
     if raw == "": return default
     return raw in ("y", "yes")
 
+def systemctl(*args):
+    try:
+        subprocess.run(["systemctl", "--user", *args], capture_output=True)
+    except FileNotFoundError:
+        pass
+
 print(f"\n{B}Monitor Dimmer — Uninstaller{R}\n")
 
 if not ask_yes_no("Remove Monitor Dimmer and all its files?", default=False):
     print("  Cancelled.\n")
     sys.exit(0)
 
-subprocess.run(["systemctl", "--user", "stop",    "monitor-dimmer.service"], capture_output=True)
-subprocess.run(["systemctl", "--user", "disable", "monitor-dimmer.service"], capture_output=True)
-subprocess.run(["systemctl", "--user", "daemon-reload"],                     capture_output=True)
+# Stopping runs ExecStopPost, which restores a dimmed monitor's brightness
+systemctl("stop",    "monitor-dimmer.service")
+systemctl("disable", "monitor-dimmer.service")
 
 for f in FILES:
-    if f.exists():
+    if f.exists() or f.is_symlink():
         f.unlink()
         print(f"  {G}✓{R}  Removed {f}")
     else:
         print(f"  {Y}–{R}  Not found: {f}")
+
+for d in DIRS:
+    if d.exists():
+        shutil.rmtree(d)
+        print(f"  {G}✓{R}  Removed {d}")
+
+systemctl("daemon-reload")
 
 # Remove from KDE favorites
 kde_stats = HOME / ".config/kactivitymanagerd-statsrc"

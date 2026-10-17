@@ -1,90 +1,47 @@
 #!/usr/bin/env python3
+"""Monitor Dimmer daemon. `monitor-dimmer --restore` undoes a leftover DDC dim."""
 import os
 import re
-import sys
-import time
+import signal
 import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 
-try:
-    import pystray
-    from PIL import Image, ImageDraw
-except ImportError:
-    print("Missing pystray or Pillow", file=sys.stderr)
-    sys.exit(1)
+import dimmer_common as dc
 
-CONFIG_FILE = Path.home() / ".config/monitor-dimmer.conf"
-OVERLAY_BIN = Path.home() / ".local/bin/monitor-dimmer-overlay"
+CFG = dc.load_config()
 
 game_active  = False
 overlay_proc = None
-lock         = threading.Lock()
+dim_lock     = threading.RLock()     # tray thread and monitor loop both dim
 
 
-def load_config():
-    cfg = {
-        "dim_level":      70,
-        "poll_interval":  5,
-        "use_overlay":    True,
-        "right_bus":      None,
-        "right_mfg":      None,
-        "right_model":    None,
-        "right_sn":       None,
-        "game_paths":     [],
-        "vlc_fullscreen": True,
-    }
-    try:
-        for line in CONFIG_FILE.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            k, _, v = line.partition("=")
-            k, v = k.strip(), v.strip()
-            if k == "dim_level":
-                cfg["dim_level"] = int(v)
-            elif k == "poll_interval":
-                cfg["poll_interval"] = int(v)
-            elif k == "use_overlay":
-                cfg["use_overlay"] = v.lower() == "true"
-            elif k == "right_bus":
-                cfg["right_bus"] = int(v)
-            elif k in ("right_mfg", "right_model", "right_sn"):
-                cfg[k] = v or None
-            elif k == "game_paths":
-                cfg["game_paths"] = [p.strip() for p in v.split(",") if p.strip()]
-            elif k == "vlc_fullscreen":
-                cfg["vlc_fullscreen"] = v.lower() == "true"
-    except FileNotFoundError:
-        pass
-    return cfg
-
-
-CFG           = load_config()
-DIM_LEVEL     = CFG["dim_level"]
-POLL_INTERVAL = CFG["poll_interval"]
-USE_OVERLAY   = CFG["use_overlay"]
-RIGHT_BUS     = CFG["right_bus"]
-RIGHT_MFG     = CFG["right_mfg"]
-RIGHT_MODEL   = CFG["right_model"]
-RIGHT_SN      = CFG["right_sn"]
-GAME_PATHS    = CFG["game_paths"]
-VLC_FULLSCREEN = CFG["vlc_fullscreen"]
-
+# ── Detection ─────────────────────────────────────────────────────────────────
 
 def is_vlc_fullscreen():
-    if not VLC_FULLSCREEN:
+    if not CFG["vlc_fullscreen"]:
         return False
     try:
-        r = subprocess.run(
-            ["qdbus", "org.mpris.MediaPlayer2.vlc",
-             "/org/mpris/MediaPlayer2",
-             "org.mpris.MediaPlayer2.Fullscreen"],
-            capture_output=True, text=True, timeout=2
-        )
-        return r.stdout.strip().lower() == "true"
-    except Exception:
-        return False
+        names = subprocess.run(
+            ["gdbus", "call", "--session", "--dest", "org.freedesktop.DBus",
+             "--object-path", "/org/freedesktop/DBus",
+             "--method", "org.freedesktop.DBus.ListNames"],
+            capture_output=True, text=True, timeout=2).stdout
+        # one name per VLC window: org.mpris.MediaPlayer2.vlc[.instanceNNN]
+        for name in set(re.findall(r"org\.mpris\.MediaPlayer2\.vlc[\w.]*", names)):
+            r = subprocess.run(
+                ["gdbus", "call", "--session", "--dest", name,
+                 "--object-path", "/org/mpris/MediaPlayer2",
+                 "--method", "org.freedesktop.DBus.Properties.Get",
+                 "org.mpris.MediaPlayer2", "Fullscreen"],
+                capture_output=True, text=True, timeout=2)
+            if "true" in r.stdout:
+                return True
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return False
 
 
 _STEAM_HELPER_PATHS = (
@@ -118,29 +75,22 @@ def _has_steam_game_id(pid_dir):
     return False
 
 
-def _is_exclusive_fullscreen():
-    """Return True if any XWayland window has _NET_WM_STATE_FULLSCREEN set."""
-    try:
-        out = subprocess.check_output(
-            ["xdotool", "search", "--onlyvisible", "--name", ""],
-            stderr=subprocess.DEVNULL, text=True, timeout=3
-        ).strip().splitlines()
-        for wid in out:
-            wid = wid.strip()
-            if not wid:
-                continue
-            try:
-                props = subprocess.check_output(
-                    ["xprop", "-id", wid, "_NET_WM_STATE"],
-                    stderr=subprocess.DEVNULL, text=True, timeout=2
-                )
-                if "_NET_WM_STATE_FULLSCREEN" in props:
-                    return True
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return False
+# /proc/*/exe is fully resolved: on Fedora Atomic /home is a symlink to
+# /var/home, so match both the configured and the resolved spelling
+GAME_DIRS = sorted({d.rstrip("/") + "/" for p in CFG["game_paths"]
+                    for d in (p, os.path.realpath(p))})
+
+def _in_game_dir(path):
+    return any(path.startswith(d) for d in GAME_DIRS)
+
+
+def _is_game_launch_arg(arg):
+    # Wine shows the game as "Z:\home\...\game.exe"; only count executables,
+    # so a file manager or shell sitting in a game folder doesn't trigger
+    arg = arg.replace("\\", "/")
+    if arg[1:3] == ":/":
+        arg = arg[2:]
+    return arg.lower().endswith(".exe") and _in_game_dir(arg)
 
 
 def _is_game_process_running():
@@ -150,35 +100,66 @@ def _is_game_process_running():
         try:
             if _has_steam_game_id(pid_dir):
                 return True
-            if GAME_PATHS:
-                exe = os.readlink(pid_dir / "exe")
-                if any(p in exe for p in GAME_PATHS):
+            if GAME_DIRS:
+                if _in_game_dir(os.readlink(pid_dir / "exe")):
                     return True
-                cmdline = (pid_dir / "cmdline").read_bytes().decode("utf-8", errors="ignore")
-                if any(p in cmdline for p in GAME_PATHS):
+                args = (pid_dir / "cmdline").read_bytes().decode("utf-8", errors="ignore")
+                if any(_is_game_launch_arg(a) for a in args.split("\x00")):
                     return True
         except OSError:
             continue
     return False
 
 
-def is_game_running():
-    if not _is_game_process_running():
-        return is_vlc_fullscreen()
-    return _is_exclusive_fullscreen()
+def _is_any_window_fullscreen():
+    """True if an X11/XWayland window is fullscreen. Without xdotool/xprop
+    (or for native Wayland games) this can't be known: assume fullscreen."""
+    try:
+        out = subprocess.check_output(
+            ["xdotool", "search", "--onlyvisible", "--name", ""],
+            stderr=subprocess.DEVNULL, text=True, timeout=3
+        ).split()
+    except FileNotFoundError:
+        return True
+    except (subprocess.SubprocessError, OSError):
+        return True
+    for wid in out:
+        try:
+            props = subprocess.check_output(
+                ["xprop", "-id", wid, "_NET_WM_STATE"],
+                stderr=subprocess.DEVNULL, text=True, timeout=2
+            )
+        except FileNotFoundError:
+            return True
+        except (subprocess.SubprocessError, OSError):
+            continue
+        if "_NET_WM_STATE_FULLSCREEN" in props:
+            return True
+    return False
 
+
+def is_game_running():
+    game = _is_game_process_running()
+    if game and CFG["require_fullscreen"]:
+        game = _is_any_window_fullscreen()
+    return game or is_vlc_fullscreen()
+
+
+# ── Dimming ───────────────────────────────────────────────────────────────────
 
 def start_overlay():
     global overlay_proc
     if overlay_proc and overlay_proc.poll() is None:
         return
-    opacity = DIM_LEVEL / 100
-    overlay_proc = subprocess.Popen(
-        ["python3", str(OVERLAY_BIN), str(opacity), RIGHT_MODEL or ""],
-        env={**os.environ,
-             "DISPLAY": os.environ.get("DISPLAY", ":0"),
-             "WAYLAND_DISPLAY": os.environ.get("WAYLAND_DISPLAY", "wayland-0")}
-    )
+    if not dc.has_target(CFG):
+        dc.warn("no dim target configured — run `dimmer` and choose a monitor")
+        return
+    cmd = [sys.executable, str(dc.OVERLAY_BIN), "--opacity", str(CFG["dim_level"] / 100)]
+    for flag, key in (("--model", "target_model"), ("--sn", "target_sn"),
+                      ("--connector", "target_connector")):
+        if CFG[key]:
+            cmd += [flag, CFG[key]]
+    overlay_proc = subprocess.Popen(cmd)
 
 
 def stop_overlay():
@@ -192,119 +173,54 @@ def stop_overlay():
     overlay_proc = None
 
 
-def update_config(values):
-    """Set keys in the config file in place, keeping every other line."""
-    try:
-        lines = CONFIG_FILE.read_text().splitlines()
-    except FileNotFoundError:
-        lines = []
-    pending = dict(values)
-    for i, line in enumerate(lines):
-        k = line.partition("=")[0].strip()
-        if k in pending:
-            lines[i] = f"{k}={pending.pop(k)}"
-    lines += [f"{k}={v}" for k, v in pending.items()]
-    CONFIG_FILE.write_text("\n".join(lines) + "\n")
-
-
-def detect_displays():
-    """Return the DDC-capable monitors as [{bus, mfg, model, sn}]."""
-    try:
-        out = subprocess.run(["ddcutil", "detect"], capture_output=True,
-                             text=True, timeout=30).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    displays, current = [], None
-    for line in out.splitlines():
-        if re.match(r"^Display \d+", line):
-            current = {}
-            displays.append(current)
-        elif re.match(r"^\S", line):
-            current = None          # "Invalid display" etc. — no DDC/CI
-        elif current is None:
-            continue
-        elif "I2C bus:" in line:
-            m = re.search(r"/dev/i2c-(\d+)", line)
-            if m:
-                current["bus"] = int(m.group(1))
-        elif "Mfg id:" in line:
-            current["mfg"] = line.split(":", 1)[1].split(" - ")[0].strip()
-        elif "Model:" in line:
-            current["model"] = line.split(":", 1)[1].strip()
-        elif "Serial number:" in line:
-            current["sn"] = line.split(":", 1)[1].strip()
-    return [d for d in displays if "bus" in d]
-
-
-def find_dim_bus():
-    """Locate the dim target by identity, not by bus number.
-
-    i2c bus numbers follow the GPU port, so swapping cables silently moves
-    the dim onto another monitor. Match the serial number first, then
-    manufacturer + model (some monitors report no serial). Fall back to the
-    stored bus only for old configs that carry no identity at all.
-    """
-    if not (RIGHT_SN or RIGHT_MODEL):
-        return RIGHT_BUS
-    displays = detect_displays()
-    if RIGHT_SN:
-        for d in displays:
-            if d.get("sn") == RIGHT_SN:
-                return d["bus"]
-    if RIGHT_MODEL:
-        matches = [d for d in displays
-                   if d.get("model") == RIGHT_MODEL
-                   and (not RIGHT_MFG or d.get("mfg") == RIGHT_MFG)]
-        if len(matches) == 1:
-            return matches[0]["bus"]
-    return None                     # monitor off or unplugged — dim nothing
-
-
-def migrate_config():
-    """Old configs only store a bus number: record who sits on it now."""
-    global RIGHT_MFG, RIGHT_MODEL, RIGHT_SN
-    if RIGHT_SN or RIGHT_MODEL or RIGHT_BUS is None:
-        return
-    for d in detect_displays():
-        if d["bus"] == RIGHT_BUS:
-            RIGHT_MFG   = d.get("mfg") or None
-            RIGHT_MODEL = d.get("model") or None
-            RIGHT_SN    = d.get("sn") or None
-            update_config({k: v for k, v in (("right_mfg", RIGHT_MFG),
-                                            ("right_model", RIGHT_MODEL),
-                                            ("right_sn", RIGHT_SN)) if v})
-            print(f"Dim target identified as {RIGHT_MFG} {RIGHT_MODEL} "
-                  f"(i2c-{RIGHT_BUS}); saved to config", flush=True)
-            return
-
-
-def set_brightness(level):
-    bus = find_dim_bus()
+def ddc_dim():
+    if dc.load_state():
+        return                                   # already dimmed
+    bus = dc.find_target_bus(CFG)
     if bus is None:
+        dc.warn("dim target monitor not found via ddcutil")
         return
-    subprocess.run(
-        ["ddcutil", "setvcp", "10", str(level), "--bus", str(bus)],
-        capture_output=True, timeout=5
-    )
+    level = dc.get_brightness(bus)
+    if level is None:
+        dc.warn(f"can't read brightness on i2c-{bus}")
+        return
+    current, _max = level
+    # Remember the user's brightness on disk, so a crash or `systemctl stop`
+    # mid-game can still restore it (see restore_leftover_dim)
+    dc.save_state({"bus": bus, "brightness": current})
+    dc.set_brightness(bus, dc.dimmed_value(current, CFG["dim_level"]))
+
+
+def ddc_restore():
+    state = dc.load_state()
+    if not state:
+        return
+    # Re-locate the monitor: the bus may have changed since dimming
+    bus = dc.find_target_bus(CFG)
+    if bus is None:
+        bus = state["bus"]
+    if dc.set_brightness(bus, state["brightness"]):
+        dc.clear_state()
 
 
 def dim_on():
-    if USE_OVERLAY:
-        start_overlay()
-    else:
-        set_brightness(100 - DIM_LEVEL)
+    with dim_lock:
+        if CFG["use_overlay"]:
+            start_overlay()
+        else:
+            ddc_dim()
 
 
 def dim_off():
-    if USE_OVERLAY:
+    with dim_lock:
         stop_overlay()
-    else:
-        set_brightness(100)
+        ddc_restore()
 
 
-TRAY_ICON_NAME = "monitor-dimmer-symbolic"
+# ── Tray ──────────────────────────────────────────────────────────────────────
 
 def make_icon(active):
+    from PIL import Image, ImageDraw
     size = 64
     img  = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d    = ImageDraw.Draw(img)
@@ -328,67 +244,116 @@ def make_icon(active):
     return img
 
 
-def monitor_loop(icon):
+def monitor_loop():
     global game_active
     while True:
-        time.sleep(POLL_INTERVAL)
-        with lock:
-            was_active = game_active
+        time.sleep(CFG["poll_interval"])
         running = is_game_running()
-        with lock:
-            game_active = running
-        if running and not was_active:
-            dim_on()
-        elif not running and was_active:
-            dim_off()
+        with dim_lock:
+            was_active, game_active = game_active, running
+            if running and not was_active:
+                dim_on()
+            elif not running and was_active:
+                dim_off()
 
 
 def on_toggle_mode(icon, item):
-    global USE_OVERLAY
-    with lock:
-        currently_dimming = game_active
-    if currently_dimming:
-        dim_off()
-    USE_OVERLAY = not USE_OVERLAY
+    with dim_lock:
+        dimming = game_active
+        if dimming:
+            dim_off()
+        CFG["use_overlay"] = not CFG["use_overlay"]
+        if dimming:
+            dim_on()
     icon.update_menu()
-    if currently_dimming:
-        dim_on()
 
 
 def on_settings(icon, item):
-    config_bin = Path.home() / ".local/bin/dimmer"
-    cmd = f"python3 {config_bin}; read -p 'Press Enter to close...'"
-    for term in ("konsole", "gnome-terminal", "xterm"):
-        try:
-            subprocess.Popen([term, "-e", "bash", "-c", cmd],
-                             start_new_session=True)
-            return
-        except FileNotFoundError:
-            continue
+    wizard = Path(__file__).resolve().parent / "dimmer"
+    if not dc.open_in_terminal([sys.executable, str(wizard)]):
+        dc.warn("no terminal emulator found — run `dimmer` from a terminal")
 
 
-def on_quit(icon, item):
+def shutdown(*_):
     dim_off()
-    icon.stop()
     os._exit(0)
 
 
-def main():
-    migrate_config()
+def on_quit(icon, item):
+    shutdown()
+
+
+def import_pystray():
+    try:
+        import pystray
+        return pystray
+    except Exception as e:
+        # PYSTRAY_BACKEND=appindicator fails hard when AppIndicator is missing
+        if os.environ.pop("PYSTRAY_BACKEND", None):
+            for mod in [m for m in sys.modules if m.startswith("pystray")]:
+                del sys.modules[mod]
+            try:
+                import pystray
+                return pystray
+            except Exception as e2:
+                e = e2
+        dc.warn(f"tray icon unavailable ({e}); running without it")
+        return None
+
+
+def run_tray(pystray):
     icon = pystray.Icon("monitor-dimmer")
     icon.icon = make_icon(True)
     icon.title = "Monitor Dimmer"
     icon.menu = pystray.Menu(
         pystray.MenuItem(
-            lambda item: "Mode: Overlay" if USE_OVERLAY else "Mode: DDC Brightness",
+            lambda item: "Mode: Overlay" if CFG["use_overlay"] else "Mode: DDC Brightness",
             on_toggle_mode,
         ),
         pystray.MenuItem("Settings", on_settings),
         pystray.MenuItem("Quit", on_quit),
     )
-    t = threading.Thread(target=monitor_loop, args=(icon,), daemon=True)
-    t.start()
     icon.run()
+
+
+def restore_leftover_dim():
+    """A previous run died while dimming: put the brightness back."""
+    if dc.load_state():
+        ddc_restore()
+
+
+def migrate_config():
+    """Old configs only store a bus number: record who sits on it now."""
+    if dc.has_target(CFG) or CFG["target_bus"] is None:
+        return
+    for d in dc.ddc_displays():
+        if d["bus"] == CFG["target_bus"]:
+            dc.set_target(CFG, d)
+            dc.save_config(CFG)
+            print(f"Dim target identified as {dc.monitor_label(d)}; saved to config", flush=True)
+            return
+
+
+def main():
+    if "--restore" in sys.argv[1:]:
+        restore_leftover_dim()
+        return
+
+    restore_leftover_dim()
+    migrate_config()
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
+    threading.Thread(target=monitor_loop, daemon=True).start()
+
+    pystray = import_pystray()
+    if pystray:
+        try:
+            run_tray(pystray)
+        except Exception as e:
+            # e.g. no notification service / no tray host on this desktop
+            dc.warn(f"tray icon failed ({e}); running without it")
+    while True:
+        signal.pause()
 
 
 if __name__ == "__main__":
