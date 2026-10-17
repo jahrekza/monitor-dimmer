@@ -379,9 +379,10 @@ def pick_detection():
     vlc = ask_yes_no("Dim while VLC is fullscreen?")
 
     print()
-    print(f"  {D}Browser video: a fullscreen window whose title contains one of the sites{R}")
-    video = ask_yes_no("Dim while YouTube is fullscreen in the browser?")
-    titles = ["YouTube"]
+    print(f"  {D}Video sites: YouTube, Netflix, Twitch, Prime Video, Disney+, Max, Vimeo,{R}")
+    print(f"  {D}Crunchyroll, Player.pl, TVP VOD, CDA, RTÉ Player and more ({len(dc.VIDEO_SITES)} in total){R}")
+    video = ask_yes_no("Dim while one of these plays fullscreen in the browser?")
+    titles = list(dc.VIDEO_SITES)
     if video:
         extra = input(f"  {D}Other sites, separated by commas (e.g. Netflix,Twitch — empty to skip){R}: ")
         titles += [t.strip() for t in extra.split(",") if t.strip() and t.strip() not in titles]
@@ -551,7 +552,7 @@ def print_summary(cfg, autostart):
     Game folders:
 {paths}
     VLC fullscreen: {on_off(cfg['vlc_fullscreen'])}
-    Browser video: {on_off(cfg['video_fullscreen'])} · {', '.join(cfg['video_titles'])}
+    Video sites: {on_off(cfg['video_fullscreen'])} · {len(cfg['video_titles'])} sites
   {D}GENERAL{R}
     Poll interval: {cfg['poll_interval']} s · start at login: {on_off(autostart)}
 """)

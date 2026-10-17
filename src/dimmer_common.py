@@ -18,6 +18,19 @@ SCREEN_KEYS  = ("mode", "level", "connector", "mfg", "model", "sn", "bus")
 LEVELS       = (30, 50, 70, 85, 100)          # offered in the tray
 IDENTITY     = ("connector", "mfg", "model", "sn", "bus")
 
+# Video sites recognised in a fullscreen browser window's title. Matched as
+# whole words, case-insensitive, so "Plex" doesn't hit "complex".
+VIDEO_SITES = [
+    # global
+    "YouTube", "Netflix", "Twitch", "Prime Video", "Disney+", "HBO Max", "Max",
+    "Apple TV", "Vimeo", "Dailymotion", "Kick", "Crunchyroll", "SkyShowtime",
+    "Paramount+", "Plex", "Jellyfin",
+    # Poland
+    "Player.pl", "Polsat Box Go", "TVP VOD", "CDA", "CANAL+",
+    # Ireland
+    "RTÉ Player", "RTE Player", "Virgin Media Player", "TG4",
+]
+
 DEFAULTS = {
     "dim_level":          70,
     "poll_interval":      5,
@@ -25,7 +38,7 @@ DEFAULTS = {
     "detect_games":       True,
     "vlc_fullscreen":     True,
     "video_fullscreen":   True,
-    "video_titles":       ["YouTube"],
+    "video_titles":       VIDEO_SITES,
     "require_fullscreen": False,
     "game_paths":         [],
 }
@@ -79,8 +92,18 @@ def load_config():
         overlay = legacy.get("use_overlay", "true").lower() in ("true", "yes", "1", "on")
         screens[1] = dict(legacy, mode="overlay" if overlay else "ddc")
 
+    if cfg["video_titles"] == ["YouTube"]:         # the 2.0 default: upgrade to the full list
+        cfg["video_titles"] = list(VIDEO_SITES)
     cfg["screens"] = [normalize_screen(screens[i]) for i in sorted(screens)]
     return cfg
+
+
+def title_matches(caption, titles):
+    """True if one of `titles` appears in `caption` as a whole word."""
+    for t in titles:
+        if re.search(r"(?<!\w)" + re.escape(t) + r"(?!\w)", caption, re.IGNORECASE):
+            return True
+    return False
 
 
 def normalize_screen(raw):

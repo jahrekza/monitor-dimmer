@@ -10,7 +10,7 @@ Automatically dims your other monitors when you launch a game or play fullscreen
 
 ## Features
 
-- **Auto-detection** — dims when a Steam, Heroic (GOG/Epic) or any game from your library folders starts, when VLC goes fullscreen, or when YouTube (or another site you list) plays fullscreen in the browser
+- **Auto-detection** — dims when a Steam, Heroic (GOG/Epic) or any game from your library folders starts, when VLC goes fullscreen, or when YouTube, Netflix, Twitch or another supported video site plays fullscreen in the browser
 - **Any number of screens** — choose which screens get dimmed and which stay untouched, each with its own mode and dim level
 - **Manual control** — "Dim now" works regardless of detection; auto-dim can be switched off
 - **Two dimming modes**, chosen per screen
@@ -103,7 +103,7 @@ Once installed the daemon runs silently in the background.
 | Steam game launches | Chosen screens dim |
 | Game from a library folder launches (Heroic, native, …) | Chosen screens dim |
 | VLC goes fullscreen | Chosen screens dim |
-| YouTube goes fullscreen in the browser | Chosen screens dim |
+| A video site goes fullscreen in the browser | Chosen screens dim |
 | Game / video closes | Brightness restored |
 
 ### System tray
@@ -116,7 +116,7 @@ Look for the monitor icon in your taskbar. If it's hidden, click the `▲` arrow
 - **Auto-dim** — turn automatic dimming on or off
 - **Dim now** — dim the chosen screens right away, whatever is running
 - **Screens** — every connected screen with *Not dimmed / Overlay / Brightness (DDC/CI)* and its *Dim level* (default, 30–100%); brightness is greyed out for screens without DDC/CI. *Refresh screen list* after plugging in a monitor
-- **Detect** — games, games only when fullscreen, VLC fullscreen, fullscreen video in the browser
+- **Detect** — games, games only when fullscreen, VLC fullscreen, video sites in fullscreen
 - **Settings…** — open the configuration wizard in a terminal
 - **Quit** — stop the daemon (restores everything)
 
@@ -137,7 +137,7 @@ dimmer
    4  Games                    on/off · only when fullscreen
    5  Game folders             list, add, remove
    6  VLC fullscreen           on/off
-   7  Browser video            on/off · sites (window titles)
+   7  Video sites              on/off · site list (YouTube, Netflix, …)
   GENERAL
    8  Auto-dim                 on/off
    9  Poll interval            seconds
@@ -179,7 +179,15 @@ Saving writes only what you changed, so changes made from the tray in the meanti
 
 **Fullscreen windows.** On KDE Plasma the daemon loads a small KWin script that reports fullscreen windows (title, process) over D-Bus whenever they change — native Wayland and X11 windows alike. On other desktops X11/XWayland windows are read with `xdotool` + `xprop`; native Wayland windows are invisible there, so leave *fullscreen only* off for native Wayland games.
 
-**Browser video.** Browsers don't tell other programs whether a video is fullscreen or which site is playing, so the daemon looks for a fullscreen window whose title contains one of `video_titles` (default `YouTube`; add e.g. `Netflix,Twitch` in the config).
+**Video sites.** Browsers don't tell other programs whether a video is fullscreen or which site is playing, so the daemon looks for a fullscreen window whose title contains the name of a supported site, as a whole word (so *Plex* doesn't match "complex"). Built-in list:
+
+| | Sites |
+|---|---|
+| Global | YouTube, Netflix, Twitch, Prime Video, Disney+, HBO Max, Max, Apple TV, Vimeo, Dailymotion, Kick, Crunchyroll, SkyShowtime, Paramount+, Plex, Jellyfin |
+| Poland | Player.pl, Polsat Box Go, TVP VOD, CDA, CANAL+ |
+| Ireland | RTÉ Player, Virgin Media Player, TG4 |
+
+The list is `video_titles` in the config; edit it in `dimmer` → *Video sites* (where *Reset to the built-in list* restores it).
 
 **VLC detection** queries every VLC instance's MPRIS2 D-Bus interface and only triggers when VLC reports `Fullscreen = true`.
 
@@ -218,7 +226,7 @@ auto_dim=true
 detect_games=true
 vlc_fullscreen=true
 video_fullscreen=true
-video_titles=YouTube,Netflix
+video_titles=YouTube,Netflix,Twitch,Prime Video,Disney+
 require_fullscreen=false
 game_paths=/home/user/.steam/steam/steamapps/common,/home/user/Games/Heroic
 screen1_mode=ddc
@@ -272,8 +280,8 @@ The service starts with `graphical-session.target`. Desktops that don't activate
 **The wrong monitor dims, or none at all**
 Tray → *Screens*: set the right screen to *Overlay* or *Brightness* and the others to *Not dimmed*. After plugging in a monitor use *Refresh screen list*.
 
-**YouTube not detected**
-The browser window must be fullscreen (video fullscreen, `F` on YouTube) and its title must contain "YouTube". On desktops other than KDE install `xdotool` and `xprop`; native Wayland browser windows can only be seen on KDE.
+**A video site is not detected**
+The browser window must be fullscreen (video fullscreen, e.g. `F` on YouTube) and its title must contain the site's name — check the tab title and add that name in `dimmer` → *Video sites*. On desktops other than KDE install `xdotool` and `xprop`; native Wayland browser windows can only be seen on KDE.
 
 **Dim not triggering for a game**
 Steam games are found automatically. Other games must run from inside one of the configured `game_paths` — re-run the installer or edit `game_paths` in the config. If *fullscreen only* is on, try turning it off.

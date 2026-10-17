@@ -139,9 +139,8 @@ def detect():
     if CFG["vlc_fullscreen"] and is_vlc_fullscreen():
         return "VLC"
     if CFG["video_fullscreen"] and CFG["video_titles"]:
-        titles = [t.lower() for t in CFG["video_titles"]]
         for w in windows() or []:
-            if any(t in w["caption"].lower() for t in titles):
+            if dc.title_matches(w["caption"], CFG["video_titles"]):
                 return "video"
     return None
 
@@ -448,7 +447,7 @@ def build_menu(pystray):
             opt("Games", "detect_games"),
             opt("Games only when fullscreen", "require_fullscreen"),
             opt("VLC fullscreen", "vlc_fullscreen"),
-            opt("Fullscreen video in browser (YouTube…)", "video_fullscreen"),
+            opt("Video sites in fullscreen (YouTube, Netflix…)", "video_fullscreen"),
         )),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Settings…", on_settings),

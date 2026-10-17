@@ -266,15 +266,20 @@ def menu_video(st):
     while True:
         cfg = st.cfg
         print()
-        item(1, "Detect browser video", on_off(cfg["video_fullscreen"]))
-        item(2, "Sites (window titles)", ", ".join(cfg["video_titles"]) or f"{DIM}none{RESET}")
-        print(f"      {DIM}Dims when a fullscreen window's title contains one of these{RESET}")
+        item(1, "Detect video sites", on_off(cfg["video_fullscreen"]))
+        item(2, "Sites", f"{len(cfg['video_titles'])} — {', '.join(cfg['video_titles'][:4])}…"
+                         if len(cfg["video_titles"]) > 4 else ", ".join(cfg["video_titles"]) or "none")
+        item(3, "Reset to the built-in list")
+        print(f"      {DIM}Dims when a fullscreen browser window's title contains one of these{RESET}")
         item(0, "Back")
         choice = ask("\n  Choose")
         if choice == "1":
             st.toggle("video_fullscreen")
         elif choice == "2":
-            edit_list(st, "video_titles", "title")
+            edit_list(st, "video_titles", "site name (as shown in the tab title)")
+        elif choice == "3":
+            st.set("video_titles", list(dc.VIDEO_SITES))
+            done(f"{len(dc.VIDEO_SITES)} sites")
         elif choice in ("0", ""):
             return
 
@@ -326,8 +331,8 @@ def print_menu(st):
     n = len(cfg["game_paths"])
     item(5, "Game folders", f"{n} folder{'s' if n != 1 else ''}")
     item(6, "VLC fullscreen", on_off(cfg["vlc_fullscreen"]))
-    item(7, "Browser video", f"{on_off(cfg['video_fullscreen'])} · "
-                             f"{', '.join(cfg['video_titles']) or 'no sites'}")
+    n = len(cfg["video_titles"])
+    item(7, "Video sites", f"{on_off(cfg['video_fullscreen'])} · {n} site{'s' if n != 1 else ''}")
 
     section("GENERAL")
     item(8, "Auto-dim", on_off(cfg["auto_dim"]))
