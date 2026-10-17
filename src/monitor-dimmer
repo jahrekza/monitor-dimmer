@@ -174,7 +174,7 @@ def start_overlay():
         return
     opacity = DIM_LEVEL / 100
     overlay_proc = subprocess.Popen(
-        ["python3", str(OVERLAY_BIN), str(opacity)],
+        ["python3", str(OVERLAY_BIN), str(opacity), RIGHT_MODEL or ""],
         env={**os.environ,
              "DISPLAY": os.environ.get("DISPLAY", ":0"),
              "WAYLAND_DISPLAY": os.environ.get("WAYLAND_DISPLAY", "wayland-0")}

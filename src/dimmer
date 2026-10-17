@@ -179,7 +179,8 @@ def menu_test_dim(cfg):
     print(f"\n{YELLOW}▸ Testing dim for 3 seconds...{RESET}")
     if cfg["use_overlay"]:
         proc = subprocess.Popen(
-            ["python3", str(OVERLAY_BIN), str(cfg["dim_level"] / 100)]
+            ["python3", str(OVERLAY_BIN), str(cfg["dim_level"] / 100),
+             cfg["right_model"] or ""]
         )
         time.sleep(3)
         proc.terminate()

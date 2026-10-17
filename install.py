@@ -485,7 +485,7 @@ def test_dim(cfg):
     if cfg["use_overlay"]:
         proc = subprocess.Popen(
             ["python3", str(BIN_DIR / "monitor-dimmer-overlay"),
-             str(cfg["dim_level"] / 100)]
+             str(cfg["dim_level"] / 100), cfg.get("right_model") or ""]
         )
         time.sleep(3)
         proc.terminate()

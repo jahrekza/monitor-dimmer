@@ -1,30 +1,51 @@
 #!/usr/bin/env python3
-"""Black overlay window on the rightmost screen. Arg: opacity 0.0–1.0"""
+"""Black overlay window on the dim target screen.
+
+Args: opacity 0.0–1.0, optional monitor model (as in right_model). Without a
+model the rightmost screen is used.
+"""
 import sys
 import signal
 from PyQt6.QtWidgets import QApplication, QWidget
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QColor, QPainter
+
+
+class Overlay(QWidget):
+    # setWindowOpacity() is a no-op on Wayland, so the window is drawn
+    # translucent and painted with a semi-transparent black instead.
+    def __init__(self, opacity):
+        super().__init__()
+        self.color = QColor(0, 0, 0, round(opacity * 255))
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    def paintEvent(self, event):
+        QPainter(self).fillRect(self.rect(), self.color)
 
 
 def main():
     opacity = float(sys.argv[1]) if len(sys.argv) > 1 else 0.7
+    model   = sys.argv[2] if len(sys.argv) > 2 else ""
 
     app = QApplication(sys.argv)
     screens = app.screens()
-    target  = max(screens, key=lambda s: s.geometry().x())
+    if model:
+        # Qt sometimes prefixes the model with the connector ("DP-2-MAG 341C")
+        matches = [s for s in screens if s.model() == model
+                   or s.model().endswith("-" + model)]
+        if not matches:
+            print(f"Screen with model {model!r} not found", file=sys.stderr)
+            sys.exit(1)
+        target = matches[0]
+    else:
+        target = max(screens, key=lambda s: s.geometry().x())
 
-    w = QWidget()
+    w = Overlay(opacity)
     w.setWindowFlags(
         Qt.WindowType.FramelessWindowHint |
         Qt.WindowType.WindowStaysOnTopHint |
         Qt.WindowType.Tool
     )
-    p = w.palette()
-    p.setColor(QPalette.ColorRole.Window, QColor(0, 0, 0))
-    w.setPalette(p)
-    w.setAutoFillBackground(True)
-    w.setWindowOpacity(opacity)
 
     w.show()
     w.windowHandle().setScreen(target)
@@ -33,6 +54,11 @@ def main():
 
     signal.signal(signal.SIGTERM, lambda *_: app.quit())
     signal.signal(signal.SIGINT,  lambda *_: app.quit())
+    # Python only runs signal handlers between bytecodes; without a timer the
+    # Qt event loop never yields and SIGTERM is ignored.
+    tick = QTimer()
+    tick.timeout.connect(lambda: None)
+    tick.start(200)
 
     sys.exit(app.exec())
 
