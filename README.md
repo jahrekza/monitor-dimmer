@@ -109,6 +109,7 @@ Options available:
 | Poll interval | How often to check if a game is running (seconds) |
 | Dim method | Overlay (black window) or dim (hardware brightness via ddcutil) |
 | VLC detection | Enable/disable fullscreen VLC triggering |
+| Dim target | Pick the monitor to dim from a list of detected screens |
 | Start service | Start the systemd user service |
 | Stop service | Stop the systemd user service |
 
@@ -162,8 +163,13 @@ poll_interval=5
 use_overlay=true
 vlc_fullscreen=true
 right_bus=10
+right_mfg=IVM
+right_model=PL3494WQ
+right_sn=1187021300709
 game_paths=/home/user/.steam/steam/steamapps/common,/home/user/Games/Heroic
 ```
+
+**How the dim target is found.** The i2c bus number belongs to the GPU port, not the monitor, so it changes when cables are swapped. Before each brightness change the daemon runs `ddcutil detect` and looks for the monitor by `right_sn`, then by `right_mfg` + `right_model` (some monitors report no serial number). If the monitor is not found — switched off or unplugged — nothing is dimmed. `right_bus` is only used by configs that have no identity yet: on first start the daemon records the monitor currently on that bus and writes its identity to the config.
 
 ---
 
@@ -194,6 +200,9 @@ Click the `▲` arrow in your KDE taskbar to expand hidden icons. Then right-cli
 systemctl --user status monitor-dimmer.service
 journalctl --user -u monitor-dimmer.service -n 50
 ```
+
+**The wrong monitor dims, or none at all**
+Run `dimmer`, choose *Choose monitor to dim* and pick the right screen. This happens when cables were swapped before upgrading from a version that stored only the bus number.
 
 **Dim not triggering for a game**
 The game executable must be inside one of the configured `game_paths`. Run `dimmer` and check the path list, or add a custom path.

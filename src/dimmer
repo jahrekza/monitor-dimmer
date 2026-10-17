@@ -24,6 +24,9 @@ def load_config():
         "poll_interval":  5,
         "use_overlay":    True,
         "right_bus":      None,
+        "right_mfg":      None,
+        "right_model":    None,
+        "right_sn":       None,
         "game_paths":     [],
         "vlc_fullscreen": True,
     }
@@ -42,6 +45,8 @@ def load_config():
                 cfg["use_overlay"] = v.lower() == "true"
             elif k == "right_bus":
                 cfg["right_bus"] = int(v)
+            elif k in ("right_mfg", "right_model", "right_sn"):
+                cfg[k] = v or None
             elif k == "game_paths":
                 cfg["game_paths"] = [p.strip() for p in v.split(",") if p.strip()]
             elif k == "vlc_fullscreen":
@@ -61,9 +66,67 @@ def save_config(cfg):
     ]
     if cfg["right_bus"] is not None:
         lines.append(f"right_bus={cfg['right_bus']}")
+    for k in ("right_mfg", "right_model", "right_sn"):
+        if cfg[k]:
+            lines.append(f"{k}={cfg[k]}")
     if cfg["game_paths"]:
         lines.append(f"game_paths={','.join(cfg['game_paths'])}")
     CONFIG_FILE.write_text("\n".join(lines) + "\n")
+
+
+def detect_displays():
+    """Return the DDC-capable monitors as [{bus, mfg, model, sn}]."""
+    try:
+        out = subprocess.run(["ddcutil", "detect"], capture_output=True,
+                             text=True, timeout=30).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    displays, current = [], None
+    for line in out.splitlines():
+        if re.match(r"^Display \d+", line):
+            current = {}
+            displays.append(current)
+        elif re.match(r"^\S", line):
+            current = None
+        elif current is None:
+            continue
+        elif "I2C bus:" in line:
+            m = re.search(r"/dev/i2c-(\d+)", line)
+            if m:
+                current["bus"] = int(m.group(1))
+        elif "Mfg id:" in line:
+            current["mfg"] = line.split(":", 1)[1].split(" - ")[0].strip()
+        elif "Model:" in line:
+            current["model"] = line.split(":", 1)[1].strip()
+        elif "Serial number:" in line:
+            current["sn"] = line.split(":", 1)[1].strip()
+    return [d for d in displays if "bus" in d]
+
+
+def find_dim_bus(cfg, displays=None):
+    """Same lookup as the daemon: serial, then mfg + model, then legacy bus."""
+    if not (cfg["right_sn"] or cfg["right_model"]):
+        return cfg["right_bus"]
+    if displays is None:
+        displays = detect_displays()
+    if cfg["right_sn"]:
+        for d in displays:
+            if d.get("sn") == cfg["right_sn"]:
+                return d["bus"]
+    if cfg["right_model"]:
+        matches = [d for d in displays
+                   if d.get("model") == cfg["right_model"]
+                   and (not cfg["right_mfg"] or d.get("mfg") == cfg["right_mfg"])]
+        if len(matches) == 1:
+            return matches[0]["bus"]
+    return None
+
+
+def target_label(cfg):
+    name = f"{cfg['right_mfg'] or ''} {cfg['right_model'] or ''}".strip()
+    if not name:
+        return f"i2c-{cfg['right_bus']}" if cfg["right_bus"] is not None else "not set"
+    return name
 
 
 def service_status():
@@ -104,6 +167,7 @@ def print_status(cfg):
 
     print(f"  Service status:     {dot} {status}")
     print(f"  Dim method:         {mode}")
+    print(f"  Dim target:         {YELLOW}{target_label(cfg)}{RESET}")
     print(f"  Dim intensity:      {YELLOW}{cfg['dim_level']}%{RESET}  {DIM}(0=none, 100=black){RESET}")
     print(f"  Poll interval:      {YELLOW}{cfg['poll_interval']}s{RESET}")
     print(f"  VLC fullscreen:     {vlc}")
@@ -120,9 +184,9 @@ def menu_test_dim(cfg):
         time.sleep(3)
         proc.terminate()
     else:
-        bus    = cfg.get("right_bus")
+        bus    = find_dim_bus(cfg)
         target = 100 - cfg["dim_level"]
-        if bus:
+        if bus is not None:
             subprocess.run(
                 ["ddcutil", "setvcp", "10", str(target), "--bus", str(bus)],
                 capture_output=True
@@ -133,9 +197,29 @@ def menu_test_dim(cfg):
                 capture_output=True
             )
         else:
-            print(f"{RED}  No monitor bus configured{RESET}")
+            print(f"{RED}  Dim target monitor not found — choose it again{RESET}")
             return
     print(f"{GREEN}✓ Done.{RESET}")
+
+
+def menu_pick_monitor(cfg):
+    print(f"{DIM}  Detecting monitors...{RESET}")
+    displays = detect_displays()
+    if not displays:
+        print(f"{RED}  No monitors detected via ddcutil{RESET}")
+        return
+    current = find_dim_bus(cfg, displays)
+    for i, d in enumerate(displays, 1):
+        mark = f"  {GREEN}← current{RESET}" if d["bus"] == current else ""
+        print(f"  {BOLD}{i}{RESET}  {d.get('mfg', '')} {d.get('model', '')}"
+              f"  {DIM}(i2c-{d['bus']}){RESET}{mark}")
+    idx = ask_int("\n  Monitor to dim", 1, len(displays), 1) - 1
+    d = displays[idx]
+    cfg["right_bus"]   = d["bus"]
+    cfg["right_mfg"]   = d.get("mfg") or None
+    cfg["right_model"] = d.get("model") or None
+    cfg["right_sn"]    = d.get("sn") or None
+    print(f"{GREEN}✓ Dim target: {target_label(cfg)}{RESET}")
 
 
 def menu_start_service():
@@ -176,9 +260,10 @@ def main():
         print(f"  {BOLD}3{RESET}  Test dim")
         print(f"  {BOLD}4{RESET}  {mode_label}")
         print(f"  {BOLD}5{RESET}  {vlc_label}")
-        print(f"  {BOLD}6{RESET}  Start service")
-        print(f"  {BOLD}7{RESET}  Stop service")
-        print(f"  {BOLD}8{RESET}  Save and exit")
+        print(f"  {BOLD}6{RESET}  Choose monitor to dim   ({target_label(cfg)})")
+        print(f"  {BOLD}7{RESET}  Start service")
+        print(f"  {BOLD}8{RESET}  Stop service")
+        print(f"  {BOLD}9{RESET}  Save and exit")
         print(f"  {BOLD}q{RESET}  Quit without saving\n")
 
         choice = input(f"{CYAN}Choose option: {RESET}").strip().lower()
@@ -201,10 +286,12 @@ def main():
             state = "enabled" if cfg["vlc_fullscreen"] else "disabled"
             print(f"{GREEN}✓ VLC fullscreen detection {state}.{RESET}")
         elif choice == "6":
-            menu_start_service()
+            menu_pick_monitor(cfg)
         elif choice == "7":
-            menu_stop_service()
+            menu_start_service()
         elif choice == "8":
+            menu_stop_service()
+        elif choice == "9":
             apply_config(cfg)
             break
         elif choice == "q":

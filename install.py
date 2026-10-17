@@ -223,6 +223,9 @@ def detect_monitors():
         elif "Mfg id:" in line:
             raw = line.split(":", 1)[-1].strip()
             current["mfg"] = raw.split(" - ")[-1].strip() if " - " in raw else raw
+            current["mfg_id"] = raw.split(" - ")[0].strip()
+        elif "Serial number:" in line:
+            current["sn"] = line.split(":", 1)[-1].strip()
 
     if current.get("bus") is not None:
         monitors.append(current)
@@ -248,7 +251,7 @@ def pick_monitors():
         warn("Only one monitor detected — dimming will affect your only screen.")
         if not ask_yes_no("Continue?", default=False):
             sys.exit(0)
-        return None, monitors[0]["bus"]
+        return None, monitors[0]
 
     print(f"  Found {len(monitors)} monitors:\n")
     for i, m in enumerate(monitors, 1):
@@ -267,10 +270,9 @@ def pick_monitors():
          for i, m in enumerate(monitors)]
     )
 
-    dim_bus = monitors[secondary_idx]["bus"]
     ok(f"Primary:  {monitor_label(monitors[primary_idx])}")
     ok(f"Dim target: {monitor_label(monitors[secondary_idx])}")
-    return monitors[primary_idx], dim_bus
+    return monitors[primary_idx], monitors[secondary_idx]
 
 # ── Game path detection ───────────────────────────────────────────────────────
 
@@ -370,6 +372,9 @@ def write_config(cfg):
     ]
     if cfg.get("right_bus") is not None:
         lines.append(f"right_bus={cfg['right_bus']}")
+    for k in ("right_mfg", "right_model", "right_sn"):
+        if cfg.get(k):
+            lines.append(f"{k}={cfg[k]}")
     if cfg.get("game_paths"):
         lines.append(f"game_paths={','.join(cfg['game_paths'])}")
     CONFIG_FILE.write_text("\n".join(lines) + "\n")
@@ -506,7 +511,7 @@ def print_summary(cfg):
   Dim intensity:   {cfg['dim_level']}%
   Poll interval:   {cfg['poll_interval']}s
   VLC detection:   {vlc}
-  Secondary bus:   i2c-{cfg.get('right_bus', '?')}
+  Dim target:      {cfg.get('right_mfg') or ''} {cfg.get('right_model') or ''} (i2c-{cfg.get('right_bus', '?')})
   Game paths:
 {paths}
 """)
@@ -519,7 +524,7 @@ def main():
     check_dependencies()
 
     # 2. Monitor selection
-    _primary, dim_bus = pick_monitors()
+    _primary, dim_target = pick_monitors()
 
     # 3. Game paths
     game_paths = pick_game_paths()
@@ -530,7 +535,12 @@ def main():
     # 5. Build final config
     cfg = {
         **settings,
-        "right_bus":  dim_bus,
+        # The bus number follows the GPU port; the daemon finds the monitor
+        # by serial / mfg + model so swapped cables don't move the dim.
+        "right_bus":   dim_target["bus"],
+        "right_mfg":   dim_target.get("mfg_id") or None,
+        "right_model": dim_target.get("model") or None,
+        "right_sn":    dim_target.get("sn") or None,
         "game_paths": game_paths,
     }
 

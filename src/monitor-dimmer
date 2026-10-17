@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import re
 import sys
 import time
 import subprocess
@@ -27,6 +28,9 @@ def load_config():
         "poll_interval":  5,
         "use_overlay":    True,
         "right_bus":      None,
+        "right_mfg":      None,
+        "right_model":    None,
+        "right_sn":       None,
         "game_paths":     [],
         "vlc_fullscreen": True,
     }
@@ -45,6 +49,8 @@ def load_config():
                 cfg["use_overlay"] = v.lower() == "true"
             elif k == "right_bus":
                 cfg["right_bus"] = int(v)
+            elif k in ("right_mfg", "right_model", "right_sn"):
+                cfg[k] = v or None
             elif k == "game_paths":
                 cfg["game_paths"] = [p.strip() for p in v.split(",") if p.strip()]
             elif k == "vlc_fullscreen":
@@ -59,6 +65,9 @@ DIM_LEVEL     = CFG["dim_level"]
 POLL_INTERVAL = CFG["poll_interval"]
 USE_OVERLAY   = CFG["use_overlay"]
 RIGHT_BUS     = CFG["right_bus"]
+RIGHT_MFG     = CFG["right_mfg"]
+RIGHT_MODEL   = CFG["right_model"]
+RIGHT_SN      = CFG["right_sn"]
 GAME_PATHS    = CFG["game_paths"]
 VLC_FULLSCREEN = CFG["vlc_fullscreen"]
 
@@ -183,11 +192,98 @@ def stop_overlay():
     overlay_proc = None
 
 
+def update_config(values):
+    """Set keys in the config file in place, keeping every other line."""
+    try:
+        lines = CONFIG_FILE.read_text().splitlines()
+    except FileNotFoundError:
+        lines = []
+    pending = dict(values)
+    for i, line in enumerate(lines):
+        k = line.partition("=")[0].strip()
+        if k in pending:
+            lines[i] = f"{k}={pending.pop(k)}"
+    lines += [f"{k}={v}" for k, v in pending.items()]
+    CONFIG_FILE.write_text("\n".join(lines) + "\n")
+
+
+def detect_displays():
+    """Return the DDC-capable monitors as [{bus, mfg, model, sn}]."""
+    try:
+        out = subprocess.run(["ddcutil", "detect"], capture_output=True,
+                             text=True, timeout=30).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    displays, current = [], None
+    for line in out.splitlines():
+        if re.match(r"^Display \d+", line):
+            current = {}
+            displays.append(current)
+        elif re.match(r"^\S", line):
+            current = None          # "Invalid display" etc. — no DDC/CI
+        elif current is None:
+            continue
+        elif "I2C bus:" in line:
+            m = re.search(r"/dev/i2c-(\d+)", line)
+            if m:
+                current["bus"] = int(m.group(1))
+        elif "Mfg id:" in line:
+            current["mfg"] = line.split(":", 1)[1].split(" - ")[0].strip()
+        elif "Model:" in line:
+            current["model"] = line.split(":", 1)[1].strip()
+        elif "Serial number:" in line:
+            current["sn"] = line.split(":", 1)[1].strip()
+    return [d for d in displays if "bus" in d]
+
+
+def find_dim_bus():
+    """Locate the dim target by identity, not by bus number.
+
+    i2c bus numbers follow the GPU port, so swapping cables silently moves
+    the dim onto another monitor. Match the serial number first, then
+    manufacturer + model (some monitors report no serial). Fall back to the
+    stored bus only for old configs that carry no identity at all.
+    """
+    if not (RIGHT_SN or RIGHT_MODEL):
+        return RIGHT_BUS
+    displays = detect_displays()
+    if RIGHT_SN:
+        for d in displays:
+            if d.get("sn") == RIGHT_SN:
+                return d["bus"]
+    if RIGHT_MODEL:
+        matches = [d for d in displays
+                   if d.get("model") == RIGHT_MODEL
+                   and (not RIGHT_MFG or d.get("mfg") == RIGHT_MFG)]
+        if len(matches) == 1:
+            return matches[0]["bus"]
+    return None                     # monitor off or unplugged — dim nothing
+
+
+def migrate_config():
+    """Old configs only store a bus number: record who sits on it now."""
+    global RIGHT_MFG, RIGHT_MODEL, RIGHT_SN
+    if RIGHT_SN or RIGHT_MODEL or RIGHT_BUS is None:
+        return
+    for d in detect_displays():
+        if d["bus"] == RIGHT_BUS:
+            RIGHT_MFG   = d.get("mfg") or None
+            RIGHT_MODEL = d.get("model") or None
+            RIGHT_SN    = d.get("sn") or None
+            update_config({k: v for k, v in (("right_mfg", RIGHT_MFG),
+                                            ("right_model", RIGHT_MODEL),
+                                            ("right_sn", RIGHT_SN)) if v})
+            print(f"Dim target identified as {RIGHT_MFG} {RIGHT_MODEL} "
+                  f"(i2c-{RIGHT_BUS}); saved to config", flush=True)
+            return
+
+
 def set_brightness(level):
-    if RIGHT_BUS is None:
+    bus = find_dim_bus()
+    if bus is None:
         return
     subprocess.run(
-        ["ddcutil", "setvcp", "10", str(level), "--bus", str(RIGHT_BUS)],
+        ["ddcutil", "setvcp", "10", str(level), "--bus", str(bus)],
         capture_output=True, timeout=5
     )
 
@@ -278,6 +374,7 @@ def on_quit(icon, item):
 
 
 def main():
+    migrate_config()
     icon = pystray.Icon("monitor-dimmer")
     icon.icon = make_icon(True)
     icon.title = "Monitor Dimmer"
