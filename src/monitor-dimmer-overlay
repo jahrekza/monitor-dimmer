@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import QApplication, QWidget
 from PyQt6.QtCore import Qt, QTimer, qInstallMessageHandler
 from PyQt6.QtGui import QColor, QPainter
 
-from dimmer_common import find_target
+from dimmer_common import find_monitor
 
 
 def screen_info(s):
@@ -73,9 +73,8 @@ def main():
         print(json.dumps(infos))
         return
 
-    cfg = {"target_model": args.model, "target_sn": args.sn,
-           "target_connector": args.connector}
-    hit = find_target(cfg, infos)
+    hit = find_monitor({"model": args.model, "sn": args.sn,
+                        "connector": args.connector}, infos)
     if hit is None:
         print("Dim target screen not found", file=sys.stderr)
         sys.exit(1)

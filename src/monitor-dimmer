@@ -10,19 +10,22 @@ import time
 from pathlib import Path
 
 import dimmer_common as dc
+from fullscreen_watch import FullscreenWatcher
 
 CFG = dc.load_config()
 
-game_active  = False
-overlay_proc = None
-dim_lock     = threading.RLock()     # tray thread and monitor loop both dim
+lock        = threading.RLock()  # tray thread and monitor loop share all state below
+detected    = None               # what triggered the dim: "game", "VLC", "video" or None
+force_on    = False              # "Dim now" from the tray
+monitors    = []                 # connected monitors, refreshed on demand
+overlays    = {}                 # id(screen) -> overlay Popen
+watcher     = FullscreenWatcher(dc.STATE_DIR / "kwin-fullscreen.js")
+tray        = None
 
 
 # ── Detection ─────────────────────────────────────────────────────────────────
 
 def is_vlc_fullscreen():
-    if not CFG["vlc_fullscreen"]:
-        return False
     try:
         names = subprocess.run(
             ["gdbus", "call", "--session", "--dest", "org.freedesktop.DBus",
@@ -111,110 +114,127 @@ def _is_game_process_running():
     return False
 
 
-def _is_any_window_fullscreen():
-    """True if an X11/XWayland window is fullscreen. Without xdotool/xprop
-    (or for native Wayland games) this can't be known: assume fullscreen."""
-    try:
-        out = subprocess.check_output(
-            ["xdotool", "search", "--onlyvisible", "--name", ""],
-            stderr=subprocess.DEVNULL, text=True, timeout=3
-        ).split()
-    except FileNotFoundError:
-        return True
-    except (subprocess.SubprocessError, OSError):
-        return True
-    for wid in out:
-        try:
-            props = subprocess.check_output(
-                ["xprop", "-id", wid, "_NET_WM_STATE"],
-                stderr=subprocess.DEVNULL, text=True, timeout=2
-            )
-        except FileNotFoundError:
-            return True
-        except (subprocess.SubprocessError, OSError):
-            continue
-        if "_NET_WM_STATE_FULLSCREEN" in props:
-            return True
-    return False
+def detect():
+    """Return what should trigger dimming right now, or None."""
+    fullscreen = False                            # fetched lazily, at most once
+    def windows():
+        nonlocal fullscreen
+        if fullscreen is False:
+            fullscreen = watcher.windows()
+            if fullscreen is not None:
+                # our own overlays are fullscreen windows too
+                with lock:
+                    ours = {p.pid for p in overlays.values()}
+                fullscreen = [w for w in fullscreen if w["pid"] not in ours]
+        return fullscreen
+
+    if CFG["detect_games"] and _is_game_process_running():
+        # Unknown window state (no KWin, no xdotool) counts as fullscreen
+        if not CFG["require_fullscreen"] or windows() is None or windows():
+            return "game"
+    if CFG["vlc_fullscreen"] and is_vlc_fullscreen():
+        return "VLC"
+    if CFG["video_fullscreen"] and CFG["video_titles"]:
+        titles = [t.lower() for t in CFG["video_titles"]]
+        for w in windows() or []:
+            if any(t in w["caption"].lower() for t in titles):
+                return "video"
+    return None
 
 
-def is_game_running():
-    game = _is_game_process_running()
-    if game and CFG["require_fullscreen"]:
-        game = _is_any_window_fullscreen()
-    return game or is_vlc_fullscreen()
+# ── Dimming, per screen ───────────────────────────────────────────────────────
 
-
-# ── Dimming ───────────────────────────────────────────────────────────────────
-
-def start_overlay():
-    global overlay_proc
-    if overlay_proc and overlay_proc.poll() is None:
+def start_overlay(screen):
+    p = overlays.get(id(screen))
+    if p and p.poll() is None:
         return
-    if not dc.has_target(CFG):
-        dc.warn("no dim target configured — run `dimmer` and choose a monitor")
-        return
-    cmd = [sys.executable, str(dc.OVERLAY_BIN), "--opacity", str(CFG["dim_level"] / 100)]
-    for flag, key in (("--model", "target_model"), ("--sn", "target_sn"),
-                      ("--connector", "target_connector")):
-        if CFG[key]:
-            cmd += [flag, CFG[key]]
-    overlay_proc = subprocess.Popen(cmd)
+    cmd = [sys.executable, str(dc.OVERLAY_BIN),
+           "--opacity", str(CFG["dim_level"] / 100), *dc.overlay_args(screen)]
+    overlays[id(screen)] = subprocess.Popen(cmd)
 
 
-def stop_overlay():
-    global overlay_proc
-    if overlay_proc and overlay_proc.poll() is None:
-        overlay_proc.terminate()
+def stop_overlay(key):
+    p = overlays.pop(key, None)
+    if p and p.poll() is None:
+        p.terminate()
         try:
-            overlay_proc.wait(timeout=2)
+            p.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            overlay_proc.kill()
-    overlay_proc = None
+            p.kill()
 
 
-def ddc_dim():
-    if dc.load_state():
-        return                                   # already dimmed
-    bus = dc.find_target_bus(CFG)
-    if bus is None:
-        dc.warn("dim target monitor not found via ddcutil")
-        return
-    level = dc.get_brightness(bus)
+def ddc_dim(screen, state, displays):
+    ident = dc.identity_of(screen)
+    if any(e.get("screen") == ident for e in state):
+        return                                    # already dimmed
+    bus = dc.find_bus(screen, displays)
+    level = dc.get_brightness(bus) if bus is not None else None
     if level is None:
-        dc.warn(f"can't read brightness on i2c-{bus}")
+        dc.warn(f"{dc.screen_label(screen)}: not reachable via ddcutil")
         return
-    current, _max = level
-    # Remember the user's brightness on disk, so a crash or `systemctl stop`
-    # mid-game can still restore it (see restore_leftover_dim)
-    dc.save_state({"bus": bus, "brightness": current})
-    dc.set_brightness(bus, dc.dimmed_value(current, CFG["dim_level"]))
+    # Save before dimming, so a crash right after can still restore
+    state.append({"screen": ident, "bus": bus, "brightness": level[0]})
+    dc.save_state(state)
+    dc.set_brightness(bus, dc.dimmed_value(level[0], CFG["dim_level"]))
 
 
-def ddc_restore():
-    state = dc.load_state()
-    if not state:
-        return
-    # Re-locate the monitor: the bus may have changed since dimming
-    bus = dc.find_target_bus(CFG)
-    if bus is None:
-        bus = state["bus"]
-    if dc.set_brightness(bus, state["brightness"]):
-        dc.clear_state()
+def ddc_restore(state, keep=lambda entry: False, displays=None):
+    """Restore every saved screen except those `keep` says stay dimmed."""
+    remaining = []
+    for e in state:
+        if keep(e):
+            remaining.append(e)
+            continue
+        # Re-locate the monitor: the bus may have changed since dimming
+        bus = dc.find_bus(e["screen"], displays) if dc.has_identity(e.get("screen", {})) else None
+        if bus is None:
+            bus = e["bus"]
+        if not dc.set_brightness(bus, e["brightness"]):
+            remaining.append(e)
+    dc.save_state(remaining)
+    return remaining
 
 
-def dim_on():
-    with dim_lock:
-        if CFG["use_overlay"]:
-            start_overlay()
-        else:
-            ddc_dim()
+def apply():
+    """Bring every screen in line with its mode and the current dim state."""
+    with lock:
+        want = force_on or (CFG["auto_dim"] and detected is not None)
+        overlay_on = {id(s) for s in CFG["screens"] if want and s["mode"] == "overlay"}
+        ddc_on = [dc.identity_of(s) for s in CFG["screens"] if want and s["mode"] == "ddc"]
+
+        for key in [k for k in overlays if k not in overlay_on]:
+            stop_overlay(key)
+
+        state = dc.load_state()
+        displays = dc.ddc_displays() if (state or ddc_on) else []
+        state = ddc_restore(state, keep=lambda e: e.get("screen") in ddc_on, displays=displays)
+        for s in CFG["screens"]:
+            if id(s) in overlay_on:
+                start_overlay(s)
+            elif want and s["mode"] == "ddc":
+                ddc_dim(s, state, displays)
+    update_tray()
 
 
-def dim_off():
-    with dim_lock:
-        stop_overlay()
-        ddc_restore()
+def undim_all():
+    with lock:
+        for key in list(overlays):
+            stop_overlay(key)
+        state = dc.load_state()
+        if state:
+            ddc_restore(state)
+
+
+def monitor_loop():
+    global detected
+    while True:
+        time.sleep(CFG["poll_interval"])
+        watcher.check()
+        now = detect() if CFG["auto_dim"] else None
+        with lock:
+            changed, detected = now != detected, now
+        if changed:
+            apply()
 
 
 # ── Tray ──────────────────────────────────────────────────────────────────────
@@ -244,28 +264,96 @@ def make_icon(active):
     return img
 
 
-def monitor_loop():
-    global game_active
-    while True:
-        time.sleep(CFG["poll_interval"])
-        running = is_game_running()
-        with dim_lock:
-            was_active, game_active = game_active, running
-            if running and not was_active:
-                dim_on()
-            elif not running and was_active:
-                dim_off()
+def status_text():
+    if force_on:
+        return "Dimmed (manual)"
+    if not CFG["auto_dim"]:
+        return "Auto-dim off"
+    if detected:
+        return f"Dimmed ({detected})"
+    return "Watching"
 
 
-def on_toggle_mode(icon, item):
-    with dim_lock:
-        dimming = game_active
-        if dimming:
-            dim_off()
-        CFG["use_overlay"] = not CFG["use_overlay"]
-        if dimming:
-            dim_on()
-    icon.update_menu()
+def update_tray():
+    if tray is not None:
+        tray.icon = make_icon(CFG["auto_dim"] or force_on)
+        tray.update_menu()
+
+
+def save_and_apply():
+    with lock:
+        dc.save_config(CFG)
+    apply()
+
+
+def refresh_monitors():
+    global monitors
+    found = dc.all_monitors()
+    with lock:
+        monitors = found
+    update_tray()
+
+
+def on_toggle_auto(icon, item):
+    global detected
+    with lock:
+        CFG["auto_dim"] = not CFG["auto_dim"]
+        if not CFG["auto_dim"]:
+            detected = None
+    save_and_apply()
+
+
+def on_toggle_force(icon, item):
+    global force_on
+    with lock:
+        force_on = not force_on
+    apply()
+
+
+def toggle_option(key):
+    def handler(icon, item):
+        with lock:
+            CFG[key] = not CFG[key]
+        save_and_apply()
+    return handler
+
+
+def set_mode(screen, mode):
+    def handler(icon, item):
+        with lock:
+            if not any(s is screen for s in CFG["screens"]):
+                CFG["screens"].append(screen)    # first time this monitor is used
+            screen["mode"] = mode
+        save_and_apply()
+    return handler
+
+
+def screen_menu(pystray):
+    with lock:
+        entries = dc.merge_screens(CFG, monitors)
+    items = []
+    for screen, connected in entries:
+        if not connected and screen["mode"] == "off":
+            continue
+        label = dc.screen_label(screen) + ("" if connected else " — disconnected")
+        modes = pystray.Menu(*[
+            pystray.MenuItem(
+                text, set_mode(screen, mode),
+                checked=lambda item, s=screen, m=mode: s["mode"] == m,
+                radio=True,
+                # brightness needs DDC/CI; the bus is known once ddcutil saw it
+                enabled=mode != "ddc" or screen.get("bus") is not None,
+            )
+            for mode, text in (("off", "Not dimmed"), ("overlay", "Overlay (black window)"),
+                               ("ddc", "Brightness (DDC/CI)"))
+        ])
+        items.append(pystray.MenuItem(label, modes))
+    if not items:
+        items.append(pystray.MenuItem("No screens found", None, enabled=False))
+    items += [pystray.Menu.SEPARATOR,
+              pystray.MenuItem("Refresh screen list",
+                               lambda icon, item: threading.Thread(target=refresh_monitors).start())]
+    return items
 
 
 def on_settings(icon, item):
@@ -275,7 +363,8 @@ def on_settings(icon, item):
 
 
 def shutdown(*_):
-    dim_off()
+    undim_all()
+    watcher.stop()
     os._exit(0)
 
 
@@ -301,37 +390,57 @@ def import_pystray():
         return None
 
 
-def run_tray(pystray):
-    icon = pystray.Icon("monitor-dimmer")
-    icon.icon = make_icon(True)
-    icon.title = "Monitor Dimmer"
-    icon.menu = pystray.Menu(
-        pystray.MenuItem(
-            lambda item: "Mode: Overlay" if CFG["use_overlay"] else "Mode: DDC Brightness",
-            on_toggle_mode,
-        ),
-        pystray.MenuItem("Settings", on_settings),
+def build_menu(pystray):
+    opt = lambda text, key: pystray.MenuItem(
+        text, toggle_option(key), checked=lambda item: CFG[key])
+    return pystray.Menu(
+        pystray.MenuItem(lambda item: status_text(), None, enabled=False),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Auto-dim", on_toggle_auto, checked=lambda item: CFG["auto_dim"]),
+        pystray.MenuItem("Dim now", on_toggle_force, checked=lambda item: force_on),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Screens", pystray.Menu(lambda: screen_menu(pystray))),
+        pystray.MenuItem("Detect", pystray.Menu(
+            opt("Games", "detect_games"),
+            opt("Games only when fullscreen", "require_fullscreen"),
+            opt("VLC fullscreen", "vlc_fullscreen"),
+            opt("Fullscreen video in browser (YouTube…)", "video_fullscreen"),
+        )),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Settings…", on_settings),
         pystray.MenuItem("Quit", on_quit),
     )
+
+
+def run_tray(pystray):
+    global tray
+    icon = pystray.Icon("monitor-dimmer")
+    icon.icon = make_icon(CFG["auto_dim"])
+    icon.title = "Monitor Dimmer"
+    icon.menu = build_menu(pystray)
+    tray = icon
     icon.run()
 
 
 def restore_leftover_dim():
     """A previous run died while dimming: put the brightness back."""
-    if dc.load_state():
-        ddc_restore()
+    state = dc.load_state()
+    if state:
+        ddc_restore(state, displays=dc.ddc_displays())
 
 
 def migrate_config():
-    """Old configs only store a bus number: record who sits on it now."""
-    if dc.has_target(CFG) or CFG["target_bus"] is None:
+    """Bus-only screens from old configs: record which monitor sits there."""
+    bus_only = [s for s in CFG["screens"] if not dc.has_identity(s) and s["bus"] is not None]
+    if not bus_only:
         return
-    for d in dc.ddc_displays():
-        if d["bus"] == CFG["target_bus"]:
-            dc.set_target(CFG, d)
-            dc.save_config(CFG)
-            print(f"Dim target identified as {dc.monitor_label(d)}; saved to config", flush=True)
-            return
+    displays = dc.ddc_displays()
+    for s in bus_only:
+        for d in displays:
+            if d["bus"] == s["bus"]:
+                s.update({k: v for k, v in dc.identity_of(d).items() if v is not None})
+                print(f"Screen identified as {dc.screen_label(s)}; saved to config", flush=True)
+    dc.save_config(CFG)
 
 
 def main():
@@ -343,6 +452,9 @@ def main():
     migrate_config()
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
+    if not watcher.start():
+        dc.warn("KWin not available; fullscreen windows are read via xdotool/xprop")
+    refresh_monitors()
     threading.Thread(target=monitor_loop, daemon=True).start()
 
     pystray = import_pystray()

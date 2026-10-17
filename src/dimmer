@@ -15,6 +15,9 @@ YELLOW = "\033[93m"
 RED    = "\033[91m"
 DIM    = "\033[2m"
 
+MODE_TEXT = {"off": "not dimmed", "overlay": "overlay (black window)",
+             "ddc": "brightness (DDC/CI)"}
+
 
 def service_status():
     try:
@@ -41,6 +44,10 @@ def ask_int(prompt, min_val, max_val, default):
             print(f"{RED}  Not a number{RESET}")
 
 
+def yes_no(v):
+    return f"{GREEN}yes{RESET}" if v else f"{DIM}no{RESET}"
+
+
 def print_header():
     print(f"\n{BOLD}{CYAN}╔══════════════════════════════════════╗")
     print(f"║   Monitor Dimmer — Configuration     ║")
@@ -50,74 +57,87 @@ def print_header():
 def print_status(cfg):
     status = service_status()
     dot    = f"{GREEN}●{RESET}" if status == "active" else f"{RED}●{RESET}"
-    mode   = (f"{CYAN}overlay{RESET} (black window)"
-              if cfg["use_overlay"] else f"{YELLOW}dim{RESET} (hardware brightness)")
-    vlc    = f"{GREEN}yes{RESET}" if cfg["vlc_fullscreen"] else f"{DIM}no{RESET}"
-    fs     = f"{GREEN}yes{RESET}" if cfg["require_fullscreen"] else f"{DIM}no{RESET}"
-    paths  = len(cfg["game_paths"])
 
     print(f"  Service status:     {dot} {status}")
-    print(f"  Dim method:         {mode}")
-    print(f"  Dim target:         {YELLOW}{dc.target_label(cfg)}{RESET}")
+    print(f"  Auto-dim:           {yes_no(cfg['auto_dim'])}")
+    print(f"  Dimmed screens:")
+    active = dc.active_screens(cfg)
+    for s in active:
+        print(f"    {YELLOW}{dc.screen_label(s)}{RESET} — {MODE_TEXT[s['mode']]}")
+    if not active:
+        print(f"    {DIM}none — choose screens (4){RESET}")
     print(f"  Dim intensity:      {YELLOW}{cfg['dim_level']}%{RESET}  {DIM}(0=none, 100=black){RESET}")
     print(f"  Poll interval:      {YELLOW}{cfg['poll_interval']}s{RESET}")
-    print(f"  VLC fullscreen:     {vlc}")
-    print(f"  Fullscreen only:    {fs}  {DIM}(dim only while the game is fullscreen){RESET}")
-    print(f"  Game paths:         {YELLOW}{paths}{RESET} configured")
+    print(f"  Detect games:       {yes_no(cfg['detect_games'])}"
+          f"   {DIM}only fullscreen:{RESET} {yes_no(cfg['require_fullscreen'])}")
+    print(f"  VLC fullscreen:     {yes_no(cfg['vlc_fullscreen'])}")
+    print(f"  Browser video:      {yes_no(cfg['video_fullscreen'])}"
+          f"   {DIM}titles: {', '.join(cfg['video_titles']) or '—'}{RESET}")
+    print(f"  Game paths:         {YELLOW}{len(cfg['game_paths'])}{RESET} configured")
     print()
 
 
 def menu_test_dim(cfg):
-    """Returns True if the dim worked."""
+    """Dim every configured screen for 3 seconds. Returns True if all worked."""
     print(f"\n{YELLOW}▸ Testing dim for 3 seconds...{RESET}")
-    if cfg["use_overlay"]:
-        if not dc.has_target(cfg):
-            print(f"{RED}  No dim target — choose a monitor first{RESET}")
-            return False
-        cmd = [sys.executable, str(dc.OVERLAY_BIN), "--opacity", str(cfg["dim_level"] / 100)]
-        for flag, key in (("--model", "target_model"), ("--sn", "target_sn"),
-                          ("--connector", "target_connector")):
-            if cfg[key]:
-                cmd += [flag, cfg[key]]
-        proc = subprocess.Popen(cmd)
-        time.sleep(3)
-        proc.terminate()
-        if proc.wait() != 0:
-            print(f"{RED}  Dim target screen not found — choose it again{RESET}")
-            return False
-    else:
-        bus   = dc.find_target_bus(cfg)
-        level = dc.get_brightness(bus) if bus is not None else None
-        if level is None:
-            print(f"{RED}  Dim target not reachable via ddcutil — choose it again{RESET}")
-            return False
-        current, _max = level
-        dc.set_brightness(bus, dc.dimmed_value(current, cfg["dim_level"]))
-        time.sleep(3)
-        dc.set_brightness(bus, current)
-    print(f"{GREEN}✓ Done.{RESET}")
-    return True
+    active = dc.active_screens(cfg)
+    if not active:
+        print(f"{RED}  No screens to dim — choose screens first{RESET}")
+        return False
+    ok = True
+    procs, restore = [], []
+    displays = dc.ddc_displays() if any(s["mode"] == "ddc" for s in active) else []
+    for s in active:
+        if s["mode"] == "overlay":
+            procs.append((s, subprocess.Popen(
+                [sys.executable, str(dc.OVERLAY_BIN), "--opacity",
+                 str(cfg["dim_level"] / 100), *dc.overlay_args(s)])))
+        else:
+            bus   = dc.find_bus(s, displays)
+            level = dc.get_brightness(bus) if bus is not None else None
+            if level is None:
+                print(f"{RED}  {dc.screen_label(s)}: not reachable via ddcutil{RESET}")
+                ok = False
+                continue
+            dc.set_brightness(bus, dc.dimmed_value(level[0], cfg["dim_level"]))
+            restore.append((bus, level[0]))
+    time.sleep(3)
+    for s, p in procs:
+        p.terminate()
+        if p.wait() != 0:
+            print(f"{RED}  {dc.screen_label(s)}: screen not found{RESET}")
+            ok = False
+    for bus, value in restore:
+        dc.set_brightness(bus, value)
+    if ok:
+        print(f"{GREEN}✓ Done.{RESET}")
+    return ok
 
 
-def menu_pick_monitor(cfg):
+def menu_screens(cfg):
     print(f"{DIM}  Detecting monitors...{RESET}")
-    monitors = dc.all_monitors()
-    if not cfg["use_overlay"]:
-        monitors = [m for m in monitors if m.get("bus") is not None]
-        if not monitors:
-            print(f"{RED}  No DDC/CI monitors found — use overlay mode, "
-                  f"or check `ddcutil detect`{RESET}")
-            return
-    if not monitors:
+    entries = dc.merge_screens(cfg, dc.all_monitors())
+    if not entries:
         print(f"{RED}  No monitors detected{RESET}")
         return
-    current = dc.find_target(cfg, monitors)
-    for i, m in enumerate(monitors, 1):
-        mark = f"  {GREEN}← current{RESET}" if m is current else ""
-        print(f"  {BOLD}{i}{RESET}  {dc.monitor_label(m)}{mark}")
-    idx = ask_int("\n  Monitor to dim", 1, len(monitors), 1) - 1
-    dc.set_target(cfg, monitors[idx])
-    print(f"{GREEN}✓ Dim target: {dc.target_label(cfg)}{RESET}")
+    for i, (s, connected) in enumerate(entries, 1):
+        gone = "" if connected else f"  {DIM}(disconnected){RESET}"
+        print(f"  {BOLD}{i}{RESET}  {dc.screen_label(s)} — {MODE_TEXT[s['mode']]}{gone}")
+    idx = ask_int("\n  Screen to change (0 = back)", 0, len(entries), 0)
+    if idx == 0:
+        return
+    screen, _ = entries[idx - 1]
+    modes = ["off", "overlay"] + (["ddc"] if screen.get("bus") is not None else [])
+    for i, m in enumerate(modes, 1):
+        print(f"  {BOLD}{i}{RESET}  {MODE_TEXT[m]}")
+    if "ddc" not in modes:
+        print(f"  {DIM}(brightness unavailable: no DDC/CI on this screen){RESET}")
+    choice = ask_int("  Mode", 1, len(modes), modes.index(screen["mode"]) + 1
+                     if screen["mode"] in modes else 1)
+    screen["mode"] = modes[choice - 1]
+    if not any(s is screen for s in cfg["screens"]):
+        cfg["screens"].append(screen)
+    print(f"{GREEN}✓ {dc.screen_label(screen)}: {MODE_TEXT[screen['mode']]}{RESET}")
 
 
 def menu_start_service():
@@ -143,28 +163,28 @@ def apply_config(cfg):
     print(f"\n{GREEN}✓ Saved and applied.{RESET}")
 
 
+TOGGLES = {
+    "5": ("detect_games",       "game detection"),
+    "6": ("require_fullscreen", "games only when fullscreen"),
+    "7": ("vlc_fullscreen",     "VLC fullscreen detection"),
+    "8": ("video_fullscreen",   "browser video (YouTube…) detection"),
+}
+
+
 def main():
     print_header()
     cfg = dc.load_config()
 
     while True:
         print_status(cfg)
-        mode_label = ("Switch to dim (hardware brightness)"
-                      if cfg["use_overlay"] else "Switch to overlay (black window)")
-        vlc_label  = ("Disable VLC fullscreen detection"
-                      if cfg["vlc_fullscreen"] else "Enable VLC fullscreen detection")
-        fs_label   = ("Dim whenever a game runs"
-                      if cfg["require_fullscreen"] else "Dim only while a game is fullscreen")
-
         print(f"  {BOLD}1{RESET}  Change dim intensity     ({cfg['dim_level']}%)")
         print(f"  {BOLD}2{RESET}  Change poll interval     ({cfg['poll_interval']}s)")
         print(f"  {BOLD}3{RESET}  Test dim")
-        print(f"  {BOLD}4{RESET}  {mode_label}")
-        print(f"  {BOLD}5{RESET}  {vlc_label}")
-        print(f"  {BOLD}6{RESET}  {fs_label}")
-        print(f"  {BOLD}7{RESET}  Choose monitor to dim    ({dc.target_label(cfg)})")
-        print(f"  {BOLD}8{RESET}  Start service")
-        print(f"  {BOLD}9{RESET}  Stop service")
+        print(f"  {BOLD}4{RESET}  Choose screens and how they are dimmed")
+        for key, (opt, text) in TOGGLES.items():
+            print(f"  {BOLD}{key}{RESET}  {'Disable' if cfg[opt] else 'Enable'} {text}")
+        print(f"  {BOLD}9{RESET}  Start service")
+        print(f"  {BOLD}0{RESET}  Stop service")
         print(f"  {BOLD}s{RESET}  Save and exit")
         print(f"  {BOLD}q{RESET}  Quit without saving\n")
 
@@ -180,28 +200,14 @@ def main():
         elif choice == "3":
             menu_test_dim(cfg)
         elif choice == "4":
-            cfg["use_overlay"] = not cfg["use_overlay"]
-            mode = "overlay (black window)" if cfg["use_overlay"] else "dim (hardware brightness)"
-            print(f"{GREEN}✓ Switched to: {mode}{RESET}")
-            if not cfg["use_overlay"] and dc.find_target_bus(cfg) is None:
-                print(f"{YELLOW}  The current target has no DDC/CI — choose a monitor (7){RESET}")
-        elif choice == "5":
-            cfg["vlc_fullscreen"] = not cfg["vlc_fullscreen"]
-            state = "enabled" if cfg["vlc_fullscreen"] else "disabled"
-            print(f"{GREEN}✓ VLC fullscreen detection {state}.{RESET}")
-        elif choice == "6":
-            cfg["require_fullscreen"] = not cfg["require_fullscreen"]
-            state = "only while fullscreen" if cfg["require_fullscreen"] else "whenever a game runs"
-            print(f"{GREEN}✓ Dimming {state}.{RESET}")
-            if cfg["require_fullscreen"]:
-                print(f"{DIM}  Sees X11/XWayland windows only (via xdotool + xprop): native{RESET}")
-                print(f"{DIM}  Wayland games never count as fullscreen, so leave this off for them.{RESET}")
-                print(f"{DIM}  Without xdotool/xprop every game counts as fullscreen.{RESET}")
-        elif choice == "7":
-            menu_pick_monitor(cfg)
-        elif choice == "8":
-            menu_start_service()
+            menu_screens(cfg)
+        elif choice in TOGGLES:
+            opt, text = TOGGLES[choice]
+            cfg[opt] = not cfg[opt]
+            print(f"{GREEN}✓ {text[0].upper() + text[1:]} {'enabled' if cfg[opt] else 'disabled'}.{RESET}")
         elif choice == "9":
+            menu_start_service()
+        elif choice == "0":
             menu_stop_service()
         elif choice == "s":
             apply_config(cfg)

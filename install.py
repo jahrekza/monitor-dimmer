@@ -33,7 +33,7 @@ SVG_DEST    = ICONS_DIR / "hicolor/scalable/apps/monitor-dimmer-symbolic.svg"
 KDE_STATS   = HOME / ".config/kactivitymanagerd-statsrc"
 
 PROGRAMS = ["monitor-dimmer", "monitor-dimmer-overlay", "dimmer"]
-MODULES  = ["dimmer_common.py"]
+MODULES  = ["dimmer_common.py", "fullscreen_watch.py"]
 
 sys.path.insert(0, str(SRC_DIR))
 import dimmer_common as dc  # noqa: E402
@@ -245,8 +245,9 @@ def setup_venv(distro):
 
 # ── Monitor selection ─────────────────────────────────────────────────────────
 
-def pick_monitor(use_overlay):
-    step("Choosing the monitor to dim")
+def pick_screens(use_overlay):
+    """Return the screens to dim, each with its mode."""
+    step("Choosing the screens to dim")
     monitors = dc.all_monitors(python=str(VENV_PY))
     if not use_overlay:
         monitors = [m for m in monitors if m.get("bus") is not None]
@@ -264,15 +265,27 @@ def pick_monitor(use_overlay):
         warn("Only one monitor detected — dimming will affect your only screen.")
         if not ask_yes_no("Continue?", default=False):
             sys.exit(0)
-        target = monitors[0]
+        chosen = monitors
     else:
-        idx = ask_choice(
-            "Which monitor should be AUTO-DIMMED? (not the one you play on)",
-            [(dc.monitor_label(m), "") for m in monitors]
-        )
-        target = monitors[idx]
-    ok(f"Dim target: {dc.monitor_label(target)}")
-    return target
+        print(f"\n  {B}Which screens should be AUTO-DIMMED? (not the ones you play on){R}")
+        for i, m in enumerate(monitors, 1):
+            print(f"    {B}{i}{R}  {dc.screen_label(m)}")
+        while True:
+            raw = input(f"\n  Numbers, separated by commas (e.g. 2 or 2,3): ").strip()
+            try:
+                picks = sorted({int(x) for x in raw.replace(" ", "").split(",") if x})
+            except ValueError:
+                continue
+            if picks and all(1 <= i <= len(monitors) for i in picks):
+                break
+        chosen = [monitors[i - 1] for i in picks]
+
+    mode = "overlay" if use_overlay else "ddc"
+    screens = [dict(dc.identity_of(m), mode=mode) for m in chosen]
+    for sc in screens:
+        ok(f"Dim: {dc.screen_label(sc)}")
+    print(f"  {D}You can change screens and set the mode per screen from the tray icon.{R}")
+    return screens
 
 # ── Game path detection ───────────────────────────────────────────────────────
 
@@ -386,15 +399,19 @@ def pick_settings(use_overlay):
     vlc = ask_yes_no("Detect VLC in fullscreen?")
 
     print()
-    print(f"  {D}Off: dim whenever a game runs. On: only while it is fullscreen —{R}")
-    print(f"  {D}X11/XWayland games only, native Wayland games are never detected.{R}")
+    print(f"  {D}A fullscreen browser window whose title contains \"YouTube\"{R}")
+    video = ask_yes_no("Detect fullscreen YouTube in the browser?")
+
+    print()
+    print(f"  {D}Off: dim whenever a game runs. On: only while a window is fullscreen{R}")
+    print(f"  {D}(KDE: all windows; other desktops: X11/XWayland windows only).{R}")
     fullscreen = ask_yes_no("Dim only while the game is fullscreen?", default=False)
 
     return {
-        "use_overlay":        use_overlay,
         "dim_level":          dim_level,
         "poll_interval":      poll,
         "vlc_fullscreen":     vlc,
+        "video_fullscreen":   video,
         "require_fullscreen": fullscreen,
     }
 
@@ -525,19 +542,22 @@ def test_dim():
 # ── Summary & main ────────────────────────────────────────────────────────────
 
 def print_summary(cfg):
-    method = "Black overlay" if cfg["use_overlay"] else "Hardware (ddcutil)"
     paths  = "\n".join(f"    • {p}" for p in cfg.get("game_paths", [])) or "    (none)"
     vlc    = "yes (fullscreen only)" if cfg["vlc_fullscreen"] else "no"
+    video  = "yes" if cfg["video_fullscreen"] else "no"
     fs     = "only while fullscreen" if cfg["require_fullscreen"] else "whenever a game runs"
+    method = {"overlay": "black overlay", "ddc": "hardware brightness"}
+    screens = "\n".join(f"    • {dc.screen_label(s)} — {method[s['mode']]}" for s in cfg["screens"])
 
     print(f"""
 {B}Installation summary:{R}
-  Dim method:      {method}
-  Dim target:      {dc.target_label(cfg)}
+  Dimmed screens:
+{screens}
   Dim intensity:   {cfg['dim_level']}%
   Dim when:        {fs}
   Poll interval:   {cfg['poll_interval']}s
   VLC detection:   {vlc}
+  YouTube:         {video}
   Game paths:
 {paths}
 """)
@@ -553,7 +573,7 @@ def main():
 
     # 2. Method and monitor
     use_overlay = pick_method()
-    target = pick_monitor(use_overlay)
+    screens = pick_screens(use_overlay)
 
     # 3. Game paths
     game_paths = pick_game_paths()
@@ -562,8 +582,8 @@ def main():
     settings = pick_settings(use_overlay)
 
     # 5. Build final config
-    cfg = dict(dc.DEFAULTS, **settings, game_paths=game_paths)
-    dc.set_target(cfg, target)
+    cfg = dc.load_config()                       # keep options set from the tray
+    cfg.update(settings, game_paths=game_paths, screens=screens)
 
     # 6. Summary + confirm
     print_summary(cfg)
