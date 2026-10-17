@@ -110,6 +110,8 @@ Once installed the daemon runs silently in the background.
 
 Look for the monitor icon in your taskbar. If it's hidden, click the `▲` arrow to expand hidden icons. Right-click for options:
 
+![Tray menu: status, Auto-dim, Dim now, Screens with per-screen mode and dim level](assets/tray-menu.png)
+
 - **Status** — what is happening right now (watching, dimmed by a game / VLC / video, manual)
 - **Auto-dim** — turn automatic dimming on or off
 - **Dim now** — dim the chosen screens right away, whatever is running
