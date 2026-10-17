@@ -13,12 +13,13 @@ import dimmer_common as dc
 from fullscreen_watch import FullscreenWatcher
 
 CFG = dc.load_config()
+CFG_MTIME = dc.config_mtime()
 
 lock        = threading.RLock()  # tray thread and monitor loop share all state below
 detected    = None               # what triggered the dim: "game", "VLC", "video" or None
 force_on    = False              # "Dim now" from the tray
 monitors    = []                 # connected monitors, refreshed on demand
-overlays    = {}                 # id(screen) -> overlay Popen
+overlays    = {}                 # dc.screen_key(screen) -> overlay Popen
 watcher     = FullscreenWatcher(dc.STATE_DIR / "kwin-fullscreen.js")
 tray        = None
 
@@ -78,10 +79,13 @@ def _has_steam_game_id(pid_dir):
     return False
 
 
-# /proc/*/exe is fully resolved: on Fedora Atomic /home is a symlink to
-# /var/home, so match both the configured and the resolved spelling
-GAME_DIRS = sorted({d.rstrip("/") + "/" for p in CFG["game_paths"]
-                    for d in (p, os.path.realpath(p))})
+def game_dirs():
+    # /proc/*/exe is fully resolved: on Fedora Atomic /home is a symlink to
+    # /var/home, so match both the configured and the resolved spelling
+    return sorted({d.rstrip("/") + "/" for p in CFG["game_paths"]
+                   for d in (p, os.path.realpath(p))})
+
+GAME_DIRS = game_dirs()
 
 def _in_game_dir(path):
     return any(path.startswith(d) for d in GAME_DIRS)
@@ -144,13 +148,18 @@ def detect():
 
 # ── Dimming, per screen ───────────────────────────────────────────────────────
 
+def overlay_key(screen):
+    # the level is part of the key, so changing it restarts the overlay
+    return dc.screen_key(screen) + (dc.screen_level(CFG, screen),)
+
+
 def start_overlay(screen):
-    p = overlays.get(id(screen))
+    p = overlays.get(overlay_key(screen))
     if p and p.poll() is None:
         return
     cmd = [sys.executable, str(dc.OVERLAY_BIN),
-           "--opacity", str(CFG["dim_level"] / 100), *dc.overlay_args(screen)]
-    overlays[id(screen)] = subprocess.Popen(cmd)
+           "--opacity", str(dc.screen_level(CFG, screen) / 100), *dc.overlay_args(screen)]
+    overlays[overlay_key(screen)] = subprocess.Popen(cmd)
 
 
 def stop_overlay(key):
@@ -165,17 +174,20 @@ def stop_overlay(key):
 
 def ddc_dim(screen, state, displays):
     ident = dc.identity_of(screen)
-    if any(e.get("screen") == ident for e in state):
-        return                                    # already dimmed
+    level = dc.screen_level(CFG, screen)
+    for e in state:
+        if e.get("screen") == ident:              # already dimmed: follow a level change
+            dc.set_brightness(e["bus"], dc.dimmed_value(e["brightness"], level))
+            return
     bus = dc.find_bus(screen, displays)
-    level = dc.get_brightness(bus) if bus is not None else None
-    if level is None:
+    current = dc.get_brightness(bus) if bus is not None else None
+    if current is None:
         dc.warn(f"{dc.screen_label(screen)}: not reachable via ddcutil")
         return
     # Save before dimming, so a crash right after can still restore
-    state.append({"screen": ident, "bus": bus, "brightness": level[0]})
+    state.append({"screen": ident, "bus": bus, "brightness": current[0]})
     dc.save_state(state)
-    dc.set_brightness(bus, dc.dimmed_value(level[0], CFG["dim_level"]))
+    dc.set_brightness(bus, dc.dimmed_value(current[0], level))
 
 
 def ddc_restore(state, keep=lambda entry: False, displays=None):
@@ -199,7 +211,7 @@ def apply():
     """Bring every screen in line with its mode and the current dim state."""
     with lock:
         want = force_on or (CFG["auto_dim"] and detected is not None)
-        overlay_on = {id(s) for s in CFG["screens"] if want and s["mode"] == "overlay"}
+        overlay_on = {overlay_key(s) for s in CFG["screens"] if want and s["mode"] == "overlay"}
         ddc_on = [dc.identity_of(s) for s in CFG["screens"] if want and s["mode"] == "ddc"]
 
         for key in [k for k in overlays if k not in overlay_on]:
@@ -209,7 +221,7 @@ def apply():
         displays = dc.ddc_displays() if (state or ddc_on) else []
         state = ddc_restore(state, keep=lambda e: e.get("screen") in ddc_on, displays=displays)
         for s in CFG["screens"]:
-            if id(s) in overlay_on:
+            if overlay_key(s) in overlay_on:
                 start_overlay(s)
             elif want and s["mode"] == "ddc":
                 ddc_dim(s, state, displays)
@@ -225,15 +237,30 @@ def undim_all():
             ddc_restore(state)
 
 
+def reload_config_if_changed():
+    """Pick up edits from the settings wizard (or by hand) without a restart."""
+    global CFG_MTIME, GAME_DIRS
+    mtime = dc.config_mtime()
+    if mtime == CFG_MTIME:
+        return False
+    with lock:
+        CFG_MTIME = mtime
+        CFG.clear()
+        CFG.update(dc.load_config())
+        GAME_DIRS = game_dirs()
+    return True
+
+
 def monitor_loop():
     global detected
     while True:
         time.sleep(CFG["poll_interval"])
         watcher.check()
+        reloaded = reload_config_if_changed()
         now = detect() if CFG["auto_dim"] else None
         with lock:
             changed, detected = now != detected, now
-        if changed:
+        if changed or reloaded:
             apply()
 
 
@@ -281,8 +308,10 @@ def update_tray():
 
 
 def save_and_apply():
+    global CFG_MTIME
     with lock:
         dc.save_config(CFG)
+        CFG_MTIME = dc.config_mtime()             # our own write: no reload
     apply()
 
 
@@ -318,12 +347,15 @@ def toggle_option(key):
     return handler
 
 
-def set_mode(screen, mode):
+def set_screen(screen, **values):
     def handler(icon, item):
         with lock:
-            if not any(s is screen for s in CFG["screens"]):
-                CFG["screens"].append(screen)    # first time this monitor is used
-            screen["mode"] = mode
+            # the menu may hold a copy from before a config reload
+            hit = dc.find_monitor(screen, CFG["screens"])
+            if hit is None:
+                hit = dict(screen)
+                CFG["screens"].append(hit)        # first time this monitor is used
+            hit.update(values)
         save_and_apply()
     return handler
 
@@ -336,9 +368,9 @@ def screen_menu(pystray):
         if not connected and screen["mode"] == "off":
             continue
         label = dc.screen_label(screen) + ("" if connected else " — disconnected")
-        modes = pystray.Menu(*[
+        modes = [
             pystray.MenuItem(
-                text, set_mode(screen, mode),
+                text, set_screen(screen, mode=mode),
                 checked=lambda item, s=screen, m=mode: s["mode"] == m,
                 radio=True,
                 # brightness needs DDC/CI; the bus is known once ddcutil saw it
@@ -346,8 +378,20 @@ def screen_menu(pystray):
             )
             for mode, text in (("off", "Not dimmed"), ("overlay", "Overlay (black window)"),
                                ("ddc", "Brightness (DDC/CI)"))
-        ])
-        items.append(pystray.MenuItem(label, modes))
+        ]
+        # how strongly: overlay opacity or how much the brightness drops
+        levels = [pystray.MenuItem(
+            f"Default ({CFG['dim_level']}%)", set_screen(screen, level=None),
+            checked=lambda item, s=screen: s.get("level") is None, radio=True)]
+        levels += [pystray.MenuItem(
+            f"{v}%", set_screen(screen, level=v),
+            checked=lambda item, s=screen, v=v: s.get("level") == v, radio=True)
+            for v in dc.LEVELS]
+        levels_item = pystray.MenuItem(
+            lambda item, s=screen: f"Dim level: {dc.screen_level(CFG, s)}%",
+            pystray.Menu(*levels), enabled=screen["mode"] != "off")
+        items.append(pystray.MenuItem(label, pystray.Menu(
+            *modes, pystray.Menu.SEPARATOR, levels_item)))
     if not items:
         items.append(pystray.MenuItem("No screens found", None, enabled=False))
     items += [pystray.Menu.SEPARATOR,
@@ -440,7 +484,7 @@ def migrate_config():
             if d["bus"] == s["bus"]:
                 s.update({k: v for k, v in dc.identity_of(d).items() if v is not None})
                 print(f"Screen identified as {dc.screen_label(s)}; saved to config", flush=True)
-    dc.save_config(CFG)
+    save_and_apply()
 
 
 def main():

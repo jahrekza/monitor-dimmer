@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""Monitor Dimmer settings. The daemon picks up saved changes by itself."""
+import os
 import subprocess
 import sys
 import time
@@ -19,22 +21,66 @@ MODE_TEXT = {"off": "not dimmed", "overlay": "overlay (black window)",
              "ddc": "brightness (DDC/CI)"}
 
 
-def service_status():
+class Settings:
+    """The config being edited plus what changed, so saving only writes our
+    changes on top of the file (the tray may have changed it meanwhile)."""
+
+    def __init__(self):
+        self.cfg = dc.load_config()
+        self.keys = set()
+        self.screens = []
+
+    def set(self, key, value):
+        if self.cfg[key] != value:
+            self.cfg[key] = value
+            self.keys.add(key)
+
+    def toggle(self, key):
+        self.set(key, not self.cfg[key])
+
+    def set_screen(self, screen, **values):
+        screen.update(values)
+        if not any(s is screen for s in self.cfg["screens"]):
+            self.cfg["screens"].append(screen)
+        self.screens = [s for s in self.screens if s is not screen] + [screen]
+
+    @property
+    def dirty(self):
+        return bool(self.keys or self.screens)
+
+    def save(self):
+        self.cfg = dc.save_changes(self.cfg, self.keys, self.screens)
+        self.keys, self.screens = set(), []
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def systemctl(*args):
     try:
-        r = subprocess.run(
-            ["systemctl", "--user", "is-active", SERVICE],
-            capture_output=True, text=True
-        )
-        return r.stdout.strip()
+        return subprocess.run(["systemctl", "--user", *args, SERVICE],
+                              capture_output=True, text=True)
     except OSError:
-        return "unknown"
+        return None
+
+
+def service_status():
+    r = systemctl("is-active")
+    return r.stdout.strip() if r else "unknown"
+
+
+def autostart_enabled():
+    r = systemctl("is-enabled")
+    return bool(r) and r.stdout.strip() == "enabled"
+
+
+def ask(prompt, default=""):
+    raw = input(f"{prompt}" + (f" [{default}]" if default != "" else "") + ": ").strip()
+    return raw if raw else str(default)
 
 
 def ask_int(prompt, min_val, max_val, default):
     while True:
-        raw = input(f"{prompt} [{default}]: ").strip()
-        if raw == "":
-            return default
+        raw = ask(prompt, default)
         try:
             v = int(raw)
             if min_val <= v <= max_val:
@@ -44,179 +90,292 @@ def ask_int(prompt, min_val, max_val, default):
             print(f"{RED}  Not a number{RESET}")
 
 
-def yes_no(v):
-    return f"{GREEN}yes{RESET}" if v else f"{DIM}no{RESET}"
+def on_off(v):
+    return f"{GREEN}on{RESET}" if v else f"{DIM}off{RESET}"
 
 
-def print_header():
-    print(f"\n{BOLD}{CYAN}╔══════════════════════════════════════╗")
-    print(f"║   Monitor Dimmer — Configuration     ║")
-    print(f"╚══════════════════════════════════════╝{RESET}\n")
+def item(key, label, value=""):
+    print(f"  {BOLD}{key:>2}{RESET}  {label:<24} {value}")
 
 
-def print_status(cfg):
-    status = service_status()
-    dot    = f"{GREEN}●{RESET}" if status == "active" else f"{RED}●{RESET}"
+def section(title):
+    print(f"\n  {DIM}{title}{RESET}")
 
-    print(f"  Service status:     {dot} {status}")
-    print(f"  Auto-dim:           {yes_no(cfg['auto_dim'])}")
-    print(f"  Dimmed screens:")
+
+def done(msg):
+    print(f"{GREEN}✓ {msg}{RESET}")
+
+
+# ── Screens ───────────────────────────────────────────────────────────────────
+
+def screens_summary(cfg):
     active = dc.active_screens(cfg)
-    for s in active:
-        print(f"    {YELLOW}{dc.screen_label(s)}{RESET} — {MODE_TEXT[s['mode']]}")
     if not active:
-        print(f"    {DIM}none — choose screens (4){RESET}")
-    print(f"  Dim intensity:      {YELLOW}{cfg['dim_level']}%{RESET}  {DIM}(0=none, 100=black){RESET}")
-    print(f"  Poll interval:      {YELLOW}{cfg['poll_interval']}s{RESET}")
-    print(f"  Detect games:       {yes_no(cfg['detect_games'])}"
-          f"   {DIM}only fullscreen:{RESET} {yes_no(cfg['require_fullscreen'])}")
-    print(f"  VLC fullscreen:     {yes_no(cfg['vlc_fullscreen'])}")
-    print(f"  Browser video:      {yes_no(cfg['video_fullscreen'])}"
-          f"   {DIM}titles: {', '.join(cfg['video_titles']) or '—'}{RESET}")
-    print(f"  Game paths:         {YELLOW}{len(cfg['game_paths'])}{RESET} configured")
-    print()
+        return f"{YELLOW}none{RESET}"
+    return ", ".join(f"{s.get('model') or s.get('connector') or '?'} — "
+                     f"{s['mode']} {dc.screen_level(cfg, s)}%" for s in active)
+
+
+def menu_screens(st):
+    print(f"{DIM}  Detecting monitors...{RESET}")
+    entries = dc.merge_screens(st.cfg, dc.all_monitors())
+    if not entries:
+        print(f"{RED}  No monitors detected{RESET}")
+        return
+    while True:
+        print()
+        for i, (s, connected) in enumerate(entries, 1):
+            gone = "" if connected else f"  {DIM}(disconnected){RESET}"
+            mode = MODE_TEXT[s["mode"]]
+            if s["mode"] != "off":
+                level = dc.screen_level(st.cfg, s)
+                own = "" if s.get("level") is not None else " (default)"
+                mode = f"{YELLOW}{mode}, {level}%{own}{RESET}"
+            print(f"  {BOLD}{i}{RESET}  {dc.screen_label(s)} — {mode}{gone}")
+        idx = ask_int("\n  Screen to change (0 = back)", 0, len(entries), 0)
+        if idx == 0:
+            return
+        screen, _ = entries[idx - 1]
+        modes = ["off", "overlay"] + (["ddc"] if screen.get("bus") is not None else [])
+        for i, m in enumerate(modes, 1):
+            print(f"    {BOLD}{i}{RESET}  {MODE_TEXT[m]}")
+        if "ddc" not in modes:
+            print(f"    {DIM}(brightness needs DDC/CI, this screen has none){RESET}")
+        current = modes.index(screen["mode"]) + 1 if screen["mode"] in modes else 1
+        mode = modes[ask_int("    Mode", 1, len(modes), current) - 1]
+        level = screen.get("level")
+        if mode != "off":
+            print(f"    {DIM}Dim level for this screen: 0–100, or Enter for the default "
+                  f"({st.cfg['dim_level']}%){RESET}")
+            raw = ask("    Dim level", level if level is not None else "")
+            if raw == "":
+                level = None
+            elif raw.isdigit() and 0 <= int(raw) <= 100:
+                level = int(raw)
+            else:
+                print(f"{RED}    Not a number between 0 and 100 — level unchanged{RESET}")
+        st.set_screen(screen, mode=mode, level=level)
 
 
 def menu_test_dim(cfg):
     """Dim every configured screen for 3 seconds. Returns True if all worked."""
-    print(f"\n{YELLOW}▸ Testing dim for 3 seconds...{RESET}")
     active = dc.active_screens(cfg)
     if not active:
-        print(f"{RED}  No screens to dim — choose screens first{RESET}")
+        print(f"{RED}  No screens to dim — choose screens first (1){RESET}")
         return False
+    print(f"{YELLOW}▸ Dimming for 3 seconds...{RESET}")
     ok = True
     procs, restore = [], []
-    displays = dc.ddc_displays() if any(s["mode"] == "ddc" for s in active) else []
-    for s in active:
-        if s["mode"] == "overlay":
-            procs.append((s, subprocess.Popen(
-                [sys.executable, str(dc.OVERLAY_BIN), "--opacity",
-                 str(cfg["dim_level"] / 100), *dc.overlay_args(s)])))
-        else:
+    try:
+        displays = dc.ddc_displays() if any(s["mode"] == "ddc" for s in active) else []
+        for s in active:
+            if s["mode"] == "overlay":
+                procs.append((s, subprocess.Popen(
+                    [sys.executable, str(dc.OVERLAY_BIN), "--opacity",
+                     str(dc.screen_level(cfg, s) / 100), *dc.overlay_args(s)])))
+                continue
             bus   = dc.find_bus(s, displays)
             level = dc.get_brightness(bus) if bus is not None else None
             if level is None:
                 print(f"{RED}  {dc.screen_label(s)}: not reachable via ddcutil{RESET}")
                 ok = False
                 continue
-            dc.set_brightness(bus, dc.dimmed_value(level[0], cfg["dim_level"]))
             restore.append((bus, level[0]))
-    time.sleep(3)
-    for s, p in procs:
-        p.terminate()
-        if p.wait() != 0:
-            print(f"{RED}  {dc.screen_label(s)}: screen not found{RESET}")
-            ok = False
-    for bus, value in restore:
-        dc.set_brightness(bus, value)
+            dc.set_brightness(bus, dc.dimmed_value(level[0], dc.screen_level(cfg, s)))
+        time.sleep(3)
+    finally:
+        # also on Ctrl+C: never leave a screen dimmed
+        for s, p in procs:
+            p.terminate()
+            if p.wait() != 0:
+                print(f"{RED}  {dc.screen_label(s)}: screen not found{RESET}")
+                ok = False
+        for bus, value in restore:
+            dc.set_brightness(bus, value)
     if ok:
-        print(f"{GREEN}✓ Done.{RESET}")
+        done("Done.")
     return ok
 
 
-def menu_screens(cfg):
-    print(f"{DIM}  Detecting monitors...{RESET}")
-    entries = dc.merge_screens(cfg, dc.all_monitors())
-    if not entries:
-        print(f"{RED}  No monitors detected{RESET}")
-        return
-    for i, (s, connected) in enumerate(entries, 1):
-        gone = "" if connected else f"  {DIM}(disconnected){RESET}"
-        print(f"  {BOLD}{i}{RESET}  {dc.screen_label(s)} — {MODE_TEXT[s['mode']]}{gone}")
-    idx = ask_int("\n  Screen to change (0 = back)", 0, len(entries), 0)
-    if idx == 0:
-        return
-    screen, _ = entries[idx - 1]
-    modes = ["off", "overlay"] + (["ddc"] if screen.get("bus") is not None else [])
-    for i, m in enumerate(modes, 1):
-        print(f"  {BOLD}{i}{RESET}  {MODE_TEXT[m]}")
-    if "ddc" not in modes:
-        print(f"  {DIM}(brightness unavailable: no DDC/CI on this screen){RESET}")
-    choice = ask_int("  Mode", 1, len(modes), modes.index(screen["mode"]) + 1
-                     if screen["mode"] in modes else 1)
-    screen["mode"] = modes[choice - 1]
-    if not any(s is screen for s in cfg["screens"]):
-        cfg["screens"].append(screen)
-    print(f"{GREEN}✓ {dc.screen_label(screen)}: {MODE_TEXT[screen['mode']]}{RESET}")
+# ── Detection ─────────────────────────────────────────────────────────────────
+
+def menu_games(st):
+    while True:
+        cfg = st.cfg
+        print()
+        item(1, "Detect games", on_off(cfg["detect_games"]))
+        item(2, "Only when fullscreen", on_off(cfg["require_fullscreen"]))
+        print(f"      {DIM}KDE sees all windows; elsewhere only X11/XWayland games{RESET}")
+        item(0, "Back")
+        choice = ask("\n  Choose")
+        if choice == "1":
+            st.toggle("detect_games")
+        elif choice == "2":
+            st.toggle("require_fullscreen")
+        elif choice in ("0", ""):
+            return
 
 
-def menu_start_service():
-    if service_status() == "active":
-        print(f"\n{DIM}Service is already running.{RESET}")
-        return
-    subprocess.run(["systemctl", "--user", "start", SERVICE])
-    print(f"\n{GREEN}▶  Service started.{RESET}")
+def edit_list(st, key, what, check=None, normalize=lambda v: v):
+    """Show a list setting with add / remove."""
+    while True:
+        values = st.cfg[key]
+        print()
+        for i, v in enumerate(values, 1):
+            print(f"  {BOLD}{i:>2}{RESET}  {v}")
+        if not values:
+            print(f"  {DIM}(none){RESET}")
+        print(f"\n  {BOLD}a{RESET}  Add {what}   {BOLD}r{RESET}  Remove   {BOLD}0{RESET}  Back")
+        choice = ask("  Choose").lower()
+        if choice == "a":
+            new = ask(f"  New {what}")
+            if not new or new == "0":
+                continue
+            new = normalize(new)
+            if "," in new:
+                print(f"{RED}  Commas are not allowed{RESET}")
+            elif check and not check(new):
+                pass
+            elif new in values:
+                print(f"{DIM}  Already in the list{RESET}")
+            else:
+                st.set(key, values + [new])
+        elif choice == "r" and values:
+            idx = ask_int(f"  Number to remove (0 = cancel)", 0, len(values), 0)
+            if idx:
+                st.set(key, values[:idx - 1] + values[idx:])
+        elif choice in ("0", ""):
+            return
 
 
-def menu_stop_service():
-    if service_status() != "active":
-        print(f"\n{DIM}Service is not running.{RESET}")
-        return
-    subprocess.run(["systemctl", "--user", "stop", SERVICE])
-    print(f"\n{YELLOW}⏹  Service stopped.{RESET}")
+def check_folder(path):
+    if not os.path.isdir(os.path.expanduser(path)):
+        print(f"{RED}  Folder not found: {path}{RESET}")
+        return False
+    return True
 
 
-def apply_config(cfg):
-    dc.save_config(cfg)
-    if service_status() == "active":
-        subprocess.run(["systemctl", "--user", "restart", SERVICE])
-    print(f"\n{GREEN}✓ Saved and applied.{RESET}")
+def menu_game_folders(st):
+    print(f"{DIM}  Steam games are found without folders. A process running from a folder{RESET}")
+    print(f"{DIM}  listed here (or a Windows .exe from it, via Wine) counts as a game.{RESET}")
+    edit_list(st, "game_paths", "folder", check_folder,
+              normalize=lambda p: os.path.abspath(os.path.expanduser(p)))
 
 
-TOGGLES = {
-    "5": ("detect_games",       "game detection"),
-    "6": ("require_fullscreen", "games only when fullscreen"),
-    "7": ("vlc_fullscreen",     "VLC fullscreen detection"),
-    "8": ("video_fullscreen",   "browser video (YouTube…) detection"),
-}
+def menu_video(st):
+    while True:
+        cfg = st.cfg
+        print()
+        item(1, "Detect browser video", on_off(cfg["video_fullscreen"]))
+        item(2, "Sites (window titles)", ", ".join(cfg["video_titles"]) or f"{DIM}none{RESET}")
+        print(f"      {DIM}Dims when a fullscreen window's title contains one of these{RESET}")
+        item(0, "Back")
+        choice = ask("\n  Choose")
+        if choice == "1":
+            st.toggle("video_fullscreen")
+        elif choice == "2":
+            edit_list(st, "video_titles", "title")
+        elif choice in ("0", ""):
+            return
+
+
+# ── Service ───────────────────────────────────────────────────────────────────
+
+def menu_service():
+    while True:
+        status = service_status()
+        dot = f"{GREEN}●{RESET}" if status == "active" else f"{RED}●{RESET}"
+        print()
+        item(1, "Start", f"{dot} {status}")
+        item(2, "Stop")
+        item(3, "Restart")
+        item(4, "Start at login", on_off(autostart_enabled()))
+        item(0, "Back")
+        choice = ask("\n  Choose")
+        actions = {"1": ("start",), "2": ("stop",), "3": ("restart",),
+                   "4": ("disable",) if autostart_enabled() else ("enable",)}
+        if choice in actions:
+            r = systemctl(*actions[choice])
+            if r is None or r.returncode != 0:
+                print(f"{RED}  systemctl {actions[choice][0]} failed"
+                      f"{': ' + r.stderr.strip() if r else ''}{RESET}")
+        elif choice in ("0", ""):
+            return
+
+
+# ── Main menu ─────────────────────────────────────────────────────────────────
+
+def print_menu(st):
+    cfg = st.cfg
+    status = service_status()
+    dot = f"{GREEN}●{RESET}" if status == "active" else f"{RED}●{RESET}"
+    print(f"\n{BOLD}{CYAN}╔══════════════════════════════════════╗")
+    print(f"║   Monitor Dimmer — Settings          ║")
+    print(f"╚══════════════════════════════════════╝{RESET}")
+    print(f"  Service: {dot} {status} · starts at login: {on_off(autostart_enabled())}"
+          f"      Auto-dim: {on_off(cfg['auto_dim'])}")
+
+    section("SCREENS")
+    item(1, "Screens to dim", screens_summary(cfg))
+    item(2, "Default dim intensity", f"{cfg['dim_level']}%  {DIM}(screens without their own level){RESET}")
+    item(3, "Test dim (3 s)")
+
+    section("DETECTION")
+    item(4, "Games", f"{on_off(cfg['detect_games'])} · only when fullscreen: "
+                     f"{on_off(cfg['require_fullscreen'])}")
+    n = len(cfg["game_paths"])
+    item(5, "Game folders", f"{n} folder{'s' if n != 1 else ''}")
+    item(6, "VLC fullscreen", on_off(cfg["vlc_fullscreen"]))
+    item(7, "Browser video", f"{on_off(cfg['video_fullscreen'])} · "
+                             f"{', '.join(cfg['video_titles']) or 'no sites'}")
+
+    section("GENERAL")
+    item(8, "Auto-dim", on_off(cfg["auto_dim"]))
+    item(9, "Poll interval", f"{cfg['poll_interval']} s")
+    item(10, "Service", "start / stop / restart / start at login")
+
+    unsaved = f"   {YELLOW}(unsaved changes){RESET}" if st.dirty else ""
+    print(f"\n  {BOLD} s{RESET}  Save    {BOLD}q{RESET}  Quit{unsaved}\n")
 
 
 def main():
-    print_header()
-    cfg = dc.load_config()
-
+    st = Settings()
     while True:
-        print_status(cfg)
-        print(f"  {BOLD}1{RESET}  Change dim intensity     ({cfg['dim_level']}%)")
-        print(f"  {BOLD}2{RESET}  Change poll interval     ({cfg['poll_interval']}s)")
-        print(f"  {BOLD}3{RESET}  Test dim")
-        print(f"  {BOLD}4{RESET}  Choose screens and how they are dimmed")
-        for key, (opt, text) in TOGGLES.items():
-            print(f"  {BOLD}{key}{RESET}  {'Disable' if cfg[opt] else 'Enable'} {text}")
-        print(f"  {BOLD}9{RESET}  Start service")
-        print(f"  {BOLD}0{RESET}  Stop service")
-        print(f"  {BOLD}s{RESET}  Save and exit")
-        print(f"  {BOLD}q{RESET}  Quit without saving\n")
-
-        choice = input(f"{CYAN}Choose option: {RESET}").strip().lower()
+        print_menu(st)
+        choice = ask(f"{CYAN}Choose{RESET}").lower()
         print()
-
         if choice == "1":
-            print(f"{DIM}  0 = no change, 50 = half brightness, 100 = completely black{RESET}")
-            cfg["dim_level"] = ask_int("  Dim intensity (0–100)", 0, 100, cfg["dim_level"])
+            menu_screens(st)
         elif choice == "2":
-            print(f"{DIM}  Lower = faster reaction, more CPU{RESET}")
-            cfg["poll_interval"] = ask_int("  Poll interval in seconds (2–60)", 2, 60, cfg["poll_interval"])
+            print(f"{DIM}  0 = no change · 50 = half · 100 = black{RESET}")
+            st.set("dim_level", ask_int("  Dim intensity (0–100)", 0, 100, st.cfg["dim_level"]))
         elif choice == "3":
-            menu_test_dim(cfg)
+            menu_test_dim(st.cfg)
         elif choice == "4":
-            menu_screens(cfg)
-        elif choice in TOGGLES:
-            opt, text = TOGGLES[choice]
-            cfg[opt] = not cfg[opt]
-            print(f"{GREEN}✓ {text[0].upper() + text[1:]} {'enabled' if cfg[opt] else 'disabled'}.{RESET}")
+            menu_games(st)
+        elif choice == "5":
+            menu_game_folders(st)
+        elif choice == "6":
+            st.toggle("vlc_fullscreen")
+        elif choice == "7":
+            menu_video(st)
+        elif choice == "8":
+            st.toggle("auto_dim")
         elif choice == "9":
-            menu_start_service()
-        elif choice == "0":
-            menu_stop_service()
+            print(f"{DIM}  Lower = faster reaction, a bit more CPU{RESET}")
+            st.set("poll_interval", ask_int("  Poll interval in seconds (2–60)", 2, 60,
+                                            st.cfg["poll_interval"]))
+        elif choice == "10":
+            menu_service()
         elif choice == "s":
-            apply_config(cfg)
-            break
+            st.save()
+            done("Saved — the running daemon picks it up within a few seconds.")
         elif choice == "q":
-            break
+            if st.dirty and ask(f"{YELLOW}  Discard unsaved changes? (y/N){RESET}").lower() not in ("y", "yes"):
+                continue
+            return
         else:
             print(f"{RED}  Unknown option{RESET}")
-        print()
 
 
 if __name__ == "__main__":

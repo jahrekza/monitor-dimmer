@@ -243,20 +243,12 @@ def setup_venv(distro):
         print(f"  {D}{install_hint(distro, ['appindicator'])}{R}")
     return indicator
 
-# ── Monitor selection ─────────────────────────────────────────────────────────
+# ── Screens ───────────────────────────────────────────────────────────────────
 
-def pick_screens(use_overlay):
+def pick_screens():
     """Return the screens to dim, each with its mode."""
-    step("Choosing the screens to dim")
+    step("Screens")
     monitors = dc.all_monitors(python=str(VENV_PY))
-    if not use_overlay:
-        monitors = [m for m in monitors if m.get("bus") is not None]
-        if not monitors:
-            err("No monitor answers DDC/CI (`ddcutil detect`).")
-            print(f"  {D}Check that ddcutil is installed and you can access /dev/i2c-*"
-                  f" (often: sudo usermod -aG i2c $USER, then log out and in).{R}")
-            print(f"  {D}Or re-run the installer and choose the overlay method.{R}")
-            sys.exit(1)
     if not monitors:
         err("No monitors detected — run the installer from your desktop session.")
         sys.exit(1)
@@ -267,9 +259,10 @@ def pick_screens(use_overlay):
             sys.exit(0)
         chosen = monitors
     else:
-        print(f"\n  {B}Which screens should be AUTO-DIMMED? (not the ones you play on){R}")
+        print(f"\n  {B}Which screens should be dimmed? (not the ones you play on){R}")
         for i, m in enumerate(monitors, 1):
-            print(f"    {B}{i}{R}  {dc.screen_label(m)}")
+            ddc = "" if m.get("bus") is not None else f"  {D}(no DDC/CI: overlay only){R}"
+            print(f"    {B}{i}{R}  {dc.screen_label(m)}{ddc}")
         while True:
             raw = input(f"\n  Numbers, separated by commas (e.g. 2 or 2,3): ").strip()
             try:
@@ -280,14 +273,24 @@ def pick_screens(use_overlay):
                 break
         chosen = [monitors[i - 1] for i in picks]
 
-    mode = "overlay" if use_overlay else "ddc"
-    screens = [dict(dc.identity_of(m), mode=mode) for m in chosen]
-    for sc in screens:
-        ok(f"Dim: {dc.screen_label(sc)}")
-    print(f"  {D}You can change screens and set the mode per screen from the tray icon.{R}")
-    return screens
+    screens = []
+    for m in chosen:
+        mode = "overlay"
+        if m.get("bus") is not None:
+            idx = ask_choice(
+                f"How should {dc.screen_label(m)} be dimmed?",
+                [("Overlay (black window)", "recommended — no flicker, can go fully black"),
+                 ("Brightness (DDC/CI)",    "lowers the monitor's own brightness")])
+            mode = "overlay" if idx == 0 else "ddc"
+        screens.append(dict(dc.identity_of(m), mode=mode))
+        ok(f"{dc.screen_label(m)} — {MODE_TEXT[mode]}")
 
-# ── Game path detection ───────────────────────────────────────────────────────
+    print()
+    print(f"  {D}0 = no change · 50 = half · 100 = black{R}")
+    dim_level = ask_int("Dim intensity (0–100)", 0, 100, 70)
+    return screens, dim_level
+
+# ── Detection ─────────────────────────────────────────────────────────────────
 
 STEAM_ROOTS = [
     HOME / ".steam/steam",
@@ -340,80 +343,65 @@ def detect_game_paths():
 
 
 def pick_game_paths():
-    step("Detecting game libraries")
-    print(f"  {D}Steam games are recognised automatically; library folders also catch{R}")
-    print(f"  {D}native games and games started from other launchers.{R}\n")
-    found = detect_game_paths()
+    print(f"\n  {B}Game folders{R}")
+    print(f"  {D}Steam games are found without folders. A process running from a folder{R}")
+    print(f"  {D}listed here (or a Windows .exe from it, via Wine) counts as a game.{R}\n")
     chosen = []
-
-    if not found:
-        warn("No game libraries detected automatically.")
-
-    for label, path in found:
+    for label, path in detect_game_paths():
         ok(f"{label}: {D}{path}{R}")
         if ask_yes_no(f"Include {path}?"):
             chosen.append(path)
 
     while True:
-        custom = input(f"\n  {D}Add a custom game path? (leave empty to skip){R}: ").strip()
+        custom = input(f"\n  {D}Add another game folder? (leave empty to skip){R}: ").strip()
         if not custom:
             break
+        path = os.path.abspath(os.path.expanduser(custom))
         if "," in custom:
-            warn("Paths containing commas are not supported, skipping")
-        elif Path(custom).expanduser().is_dir():
-            chosen.append(str(Path(custom).expanduser()))
-        else:
-            warn(f"Path not found, skipping: {custom}")
-
+            warn("Folders containing commas are not supported, skipping")
+        elif not Path(path).is_dir():
+            warn(f"Folder not found, skipping: {custom}")
+        elif path not in chosen:
+            chosen.append(path)
     return chosen
 
-# ── Settings wizard ───────────────────────────────────────────────────────────
 
-def pick_method():
-    step("Dimming method")
-    has_ddc = shutil.which("ddcutil") is not None
-    method_idx = ask_choice(
-        "How should the screen be dimmed?",
-        [
-            ("Black overlay",        "recommended — works on any screen, can go fully black"),
-            ("Hardware brightness",  "changes monitor brightness via DDC/CI"
-                                     + ("" if has_ddc else " (needs ddcutil)")),
-        ]
-    )
-    return method_idx == 0
-
-
-def pick_settings(use_overlay):
-    step("Dimming settings")
-    if use_overlay:
-        print(f"  {D}0 = invisible, 50 = semi-transparent, 100 = fully black{R}")
-    else:
-        print(f"  {D}0 = no change, 50 = half of your brightness, 100 = pitch black{R}")
-    dim_level = ask_int("Dim intensity (0–100)", 0, 100, 70)
+def pick_detection():
+    step("Detection")
+    games = ask_yes_no("Dim while a game runs?")
+    fullscreen, game_paths = False, []
+    if games:
+        print(f"  {D}Only when fullscreen: KDE sees all windows; elsewhere only X11/XWayland games{R}")
+        fullscreen = ask_yes_no("…only while a window is fullscreen?", default=False)
+        game_paths = pick_game_paths()
 
     print()
-    print(f"  {D}How often to check if a game/media is running{R}")
-    poll = ask_int("Poll interval in seconds (2–60)", 2, 60, 5)
+    vlc = ask_yes_no("Dim while VLC is fullscreen?")
 
     print()
-    vlc = ask_yes_no("Detect VLC in fullscreen?")
-
-    print()
-    print(f"  {D}A fullscreen browser window whose title contains \"YouTube\"{R}")
-    video = ask_yes_no("Detect fullscreen YouTube in the browser?")
-
-    print()
-    print(f"  {D}Off: dim whenever a game runs. On: only while a window is fullscreen{R}")
-    print(f"  {D}(KDE: all windows; other desktops: X11/XWayland windows only).{R}")
-    fullscreen = ask_yes_no("Dim only while the game is fullscreen?", default=False)
+    print(f"  {D}Browser video: a fullscreen window whose title contains one of the sites{R}")
+    video = ask_yes_no("Dim while YouTube is fullscreen in the browser?")
+    titles = ["YouTube"]
+    if video:
+        extra = input(f"  {D}Other sites, separated by commas (e.g. Netflix,Twitch — empty to skip){R}: ")
+        titles += [t.strip() for t in extra.split(",") if t.strip() and t.strip() not in titles]
 
     return {
-        "dim_level":          dim_level,
-        "poll_interval":      poll,
+        "detect_games":       games,
+        "require_fullscreen": fullscreen,
+        "game_paths":         game_paths,
         "vlc_fullscreen":     vlc,
         "video_fullscreen":   video,
-        "require_fullscreen": fullscreen,
+        "video_titles":       titles,
     }
+
+
+def pick_general():
+    step("General")
+    print(f"  {D}How often to check for games and video (lower = faster, a bit more CPU){R}")
+    poll = ask_int("Poll interval in seconds (2–60)", 2, 60, 5)
+    autostart = ask_yes_no("Start Monitor Dimmer at login?")
+    return {"poll_interval": poll}, autostart
 
 # ── Installation ──────────────────────────────────────────────────────────────
 
@@ -533,7 +521,7 @@ def start_service():
 
 
 def test_dim():
-    print(f"\n  {Y}Testing dim for 3 seconds — look at the dim target...{R}")
+    print(f"\n  {Y}Testing dim for 3 seconds — look at the chosen screens...{R}")
     r = run([str(BIN_DIR / "dimmer"), "--test"])
     print(r.stdout, end="")
     if r.returncode != 0:
@@ -541,25 +529,31 @@ def test_dim():
 
 # ── Summary & main ────────────────────────────────────────────────────────────
 
-def print_summary(cfg):
-    paths  = "\n".join(f"    • {p}" for p in cfg.get("game_paths", [])) or "    (none)"
-    vlc    = "yes (fullscreen only)" if cfg["vlc_fullscreen"] else "no"
-    video  = "yes" if cfg["video_fullscreen"] else "no"
-    fs     = "only while fullscreen" if cfg["require_fullscreen"] else "whenever a game runs"
-    method = {"overlay": "black overlay", "ddc": "hardware brightness"}
-    screens = "\n".join(f"    • {dc.screen_label(s)} — {method[s['mode']]}" for s in cfg["screens"])
+MODE_TEXT = {"off": "not dimmed", "overlay": "overlay (black window)",
+             "ddc": "brightness (DDC/CI)"}
 
+
+def on_off(v):
+    return f"{G}on{R}" if v else f"{D}off{R}"
+
+
+def print_summary(cfg, autostart):
+    screens = "\n".join(f"    • {dc.screen_label(s)} — {MODE_TEXT[s['mode']]}"
+                        for s in dc.active_screens(cfg)) or "    (none)"
+    paths   = "\n".join(f"      • {p}" for p in cfg["game_paths"]) or "      (none)"
     print(f"""
-{B}Installation summary:{R}
-  Dimmed screens:
+{B}Summary{R}
+  {D}SCREENS{R}
 {screens}
-  Dim intensity:   {cfg['dim_level']}%
-  Dim when:        {fs}
-  Poll interval:   {cfg['poll_interval']}s
-  VLC detection:   {vlc}
-  YouTube:         {video}
-  Game paths:
+    Dim intensity: {cfg['dim_level']}%
+  {D}DETECTION{R}
+    Games: {on_off(cfg['detect_games'])} · only when fullscreen: {on_off(cfg['require_fullscreen'])}
+    Game folders:
 {paths}
+    VLC fullscreen: {on_off(cfg['vlc_fullscreen'])}
+    Browser video: {on_off(cfg['video_fullscreen'])} · {', '.join(cfg['video_titles'])}
+  {D}GENERAL{R}
+    Poll interval: {cfg['poll_interval']} s · start at login: {on_off(autostart)}
 """)
 
 
@@ -571,31 +565,29 @@ def main():
     check_system_tools(distro)
     indicator = setup_venv(distro)
 
-    # 2. Method and monitor
-    use_overlay = pick_method()
-    screens = pick_screens(use_overlay)
+    # 2. Settings — an update can keep the existing ones
+    cfg = dc.load_config()
+    keep = False
+    if dc.CONFIG_FILE.exists() and dc.active_screens(cfg):
+        step("Existing settings found")
+        print(f"  {D}Screens: {dc.screens_label(cfg)}{R}")
+        keep = ask_yes_no("Keep your current settings and just update the program?")
+    if keep:
+        # keep the user's choice; a first install of the service defaults to on
+        state = run(["systemctl", "--user", "is-enabled", "monitor-dimmer.service"]).stdout.strip()
+        autostart = state in ("enabled", "") or "not-found" in state
+    else:
+        screens, dim_level = pick_screens()
+        detection = pick_detection()
+        general, autostart = pick_general()
+        cfg.update(detection, **general, dim_level=dim_level, screens=screens)
 
-    # 3. Game paths
-    game_paths = pick_game_paths()
+        print_summary(cfg, autostart)
+        if not ask_yes_no("Proceed with installation?"):
+            print(f"\n  {D}Installation cancelled.{R}\n")
+            sys.exit(0)
 
-    # 4. Settings
-    settings = pick_settings(use_overlay)
-
-    # 5. Build final config
-    cfg = dc.load_config()                       # keep options set from the tray
-    cfg.update(settings, game_paths=game_paths, screens=screens)
-
-    # 6. Summary + confirm
-    print_summary(cfg)
-    if not ask_yes_no("Proceed with installation?"):
-        print(f"\n  {D}Installation cancelled.{R}\n")
-        sys.exit(0)
-
-    # 7. Autostart
-    print()
-    autostart = ask_yes_no("Start Monitor Dimmer automatically at login?")
-
-    # 8. Install
+    # 3. Install
     step("Installing")
     install_icon()
     write_config(cfg)
@@ -603,27 +595,28 @@ def main():
     install_service(autostart, indicator)
     install_desktop_entry()
 
-    # 9. KDE favorites (optional)
+    # 4. KDE favorites (optional)
     desktop = os.environ.get("XDG_CURRENT_DESKTOP", "")
-    if "KDE" in desktop:
+    if "KDE" in desktop and not keep:
         if ask_yes_no("\nAdd to KDE application launcher favorites?"):
             add_to_kde_favorites()
 
-    # 10. Start
+    # 5. Start
     step("Starting service")
     start_service()
 
-    # 11. Test
+    # 6. Test
     if ask_yes_no("\nRun a quick dim test now?"):
         test_dim()
 
     print(f"""
 {G}{B}✓ Installation complete!{R}
 
-  • The service starts automatically at login
-  • System tray icon: look for it in your taskbar (may be hidden — click ▲)
-  • To reconfigure: run {B}dimmer{R}
-  • To uninstall:   run {B}python3 {REPO_DIR}/uninstall.py{R}
+  • System tray icon: auto-dim, dim now, screens and detection
+    (it may be hidden — click ▲ in the taskbar)
+  • All settings: run {B}dimmer{R}
+  • To update:    git pull, then run this installer again
+  • To uninstall: run {B}python3 {REPO_DIR}/uninstall.py{R}
 """)
 
 

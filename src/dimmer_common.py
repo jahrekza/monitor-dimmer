@@ -14,7 +14,8 @@ HERE        = Path(__file__).resolve().parent
 OVERLAY_BIN = HERE / "monitor-dimmer-overlay"
 
 MODES        = ("off", "overlay", "ddc")
-SCREEN_KEYS  = ("mode", "connector", "mfg", "model", "sn", "bus")
+SCREEN_KEYS  = ("mode", "level", "connector", "mfg", "model", "sn", "bus")
+LEVELS       = (30, 50, 70, 85, 100)          # offered in the tray
 IDENTITY     = ("connector", "mfg", "model", "sn", "bus")
 
 DEFAULTS = {
@@ -89,7 +90,22 @@ def normalize_screen(raw):
     except ValueError:
         s["bus"] = None
     s["mode"] = raw.get("mode") if raw.get("mode") in MODES else "overlay"
+    try:                                          # per-screen dim level, else dim_level
+        s["level"] = min(max(int(raw["level"]), 0), 100) if raw.get("level") not in (None, "") else None
+    except ValueError:
+        s["level"] = None
     return s
+
+
+def screen_level(cfg, screen):
+    return screen["level"] if screen.get("level") is not None else cfg["dim_level"]
+
+
+def config_mtime():
+    try:
+        return CONFIG_FILE.stat().st_mtime_ns
+    except FileNotFoundError:
+        return None
 
 
 def save_config(cfg):
@@ -101,12 +117,35 @@ def save_config(cfg):
         elif isinstance(v, list):
             v = ",".join(v)
         lines.append(f"{k}={v}")
-    for i, s in enumerate(cfg.get("screens", []), 1):
+    # screens set to "off" are the same as unlisted ones: drop them
+    for i, s in enumerate([s for s in cfg.get("screens", []) if s["mode"] != "off"], 1):
         for k in SCREEN_KEYS:
             if s.get(k) is not None:
                 lines.append(f"screen{i}_{k}={s[k]}")
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text("\n".join(lines) + "\n")
+
+
+def save_changes(cfg, keys, screens):
+    """Write only what the caller changed on top of the file's current
+    content, so changes made meanwhile (e.g. from the tray) survive.
+    `keys`: changed option names; `screens`: screens whose mode changed."""
+    current = load_config()
+    for k in keys:
+        current[k] = cfg[k]
+    for s in screens:
+        hit = find_monitor(s, current["screens"])
+        if hit is not None:
+            hit["mode"], hit["level"] = s["mode"], s.get("level")
+        else:
+            current["screens"].append(dict(s))
+    save_config(current)
+    return current
+
+
+def screen_key(s):
+    """Stable key for a screen while the daemon runs (survives config reloads)."""
+    return (s.get("sn"), s.get("model"), s.get("connector"))
 
 
 def has_identity(screen):
@@ -152,7 +191,7 @@ def ddc_displays():
             m = re.search(r"/dev/i2c-(\d+)", line)
             if m:
                 current["bus"] = int(m.group(1))
-        elif "DRM connector:" in line:
+        elif re.search(r"DRM[ _]connector:", line):   # "DRM_connector:" in full output
             # "card1-DP-3" -> "DP-3", the name compositors use
             current["connector"] = re.sub(r"^card\d+-", "", line.split(":", 1)[1].strip())
         elif "Mfg id:" in line:

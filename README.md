@@ -11,7 +11,7 @@ Automatically dims your other monitors when you launch a game or play fullscreen
 ## Features
 
 - **Auto-detection** — dims when a Steam, Heroic (GOG/Epic) or any game from your library folders starts, when VLC goes fullscreen, or when YouTube (or another site you list) plays fullscreen in the browser
-- **Any number of screens** — choose which screens get dimmed and which stay untouched, each with its own mode
+- **Any number of screens** — choose which screens get dimmed and which stay untouched, each with its own mode and dim level
 - **Manual control** — "Dim now" works regardless of detection; auto-dim can be switched off
 - **Two dimming modes**, chosen per screen
   - **Black overlay** *(recommended)* — a borderless black window covers the screen, zero flicker, can go fully black, works on any screen (laptop panels and TVs too); clicks pass through it
@@ -90,6 +90,8 @@ git pull
 python3 install.py
 ```
 
+The installer offers to keep your current settings and only update the program.
+
 ---
 
 ## Usage
@@ -111,7 +113,7 @@ Look for the monitor icon in your taskbar. If it's hidden, click the `▲` arrow
 - **Status** — what is happening right now (watching, dimmed by a game / VLC / video, manual)
 - **Auto-dim** — turn automatic dimming on or off
 - **Dim now** — dim the chosen screens right away, whatever is running
-- **Screens** — every connected screen with *Not dimmed / Overlay / Brightness (DDC/CI)*; brightness is greyed out for screens without DDC/CI. *Refresh screen list* after plugging in a monitor
+- **Screens** — every connected screen with *Not dimmed / Overlay / Brightness (DDC/CI)* and its *Dim level* (default, 30–100%); brightness is greyed out for screens without DDC/CI. *Refresh screen list* after plugging in a monitor
 - **Detect** — games, games only when fullscreen, VLC fullscreen, fullscreen video in the browser
 - **Settings…** — open the configuration wizard in a terminal
 - **Quit** — stop the daemon (restores everything)
@@ -124,10 +126,26 @@ Changes made in the tray are saved to the config.
 dimmer
 ```
 
-Options available:
+```
+  SCREENS
+   1  Screens to dim           per screen: overlay / brightness, own dim level
+   2  Default dim intensity    used by screens without their own level
+   3  Test dim (3 s)
+  DETECTION
+   4  Games                    on/off · only when fullscreen
+   5  Game folders             list, add, remove
+   6  VLC fullscreen           on/off
+   7  Browser video            on/off · sites (window titles)
+  GENERAL
+   8  Auto-dim                 on/off
+   9  Poll interval            seconds
+  10  Service                  start / stop / restart / start at login
+   s  Save    q  Quit
+```
 
-| Setting | Description |
-|---------|-------------|
+Saving writes only what you changed, so changes made from the tray in the meantime are kept, and the running daemon picks the new settings up within a few seconds — no restart.
+
+---------|-------------|
 | Dim intensity | 0 = no change · 50 = half brightness · 100 = fully black |
 | Poll interval | How often to check if a game is running (seconds) |
 | Test dim | Dim the chosen screens for 3 seconds |
@@ -202,6 +220,7 @@ video_titles=YouTube,Netflix
 require_fullscreen=false
 game_paths=/home/user/.steam/steam/steamapps/common,/home/user/Games/Heroic
 screen1_mode=ddc
+screen1_level=50
 screen1_connector=DP-3
 screen1_mfg=IVM
 screen1_model=PL3494WQ
@@ -212,7 +231,7 @@ screen2_connector=HDMI-A-1
 screen2_model=LG TV
 ```
 
-`screenN_mode` is `off`, `overlay` or `ddc`. Screens that aren't listed are never touched.
+`screenN_mode` is `off`, `overlay` or `ddc`; `screenN_level` (0–100) overrides `dim_level` for that screen. Screens that aren't listed are never touched.
 
 **How screens are found.** Bus numbers and connector names belong to the GPU port, not the monitor, so they change when cables are swapped. The daemon looks for each screen by `sn`, then by `model`, and uses `connector` / `bus` only to tell identical monitors apart. A screen that is not found — switched off or unplugged — is skipped. Configs from older versions (`right_*` / `target_*` keys, or only a bus number) are read as `screen1`.
 
