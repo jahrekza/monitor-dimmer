@@ -138,13 +138,20 @@ def menu_test_dim(cfg):
     print(f"{GREEN}✓ Done.{RESET}")
 
 
-def menu_toggle_service():
+def menu_start_service():
     if service_status() == "active":
-        subprocess.run(["systemctl", "--user", "stop", SERVICE])
-        print(f"\n{YELLOW}⏹  Service stopped.{RESET}")
-    else:
-        subprocess.run(["systemctl", "--user", "start", SERVICE])
-        print(f"\n{GREEN}▶  Service started.{RESET}")
+        print(f"\n{DIM}Service is already running.{RESET}")
+        return
+    subprocess.run(["systemctl", "--user", "start", SERVICE])
+    print(f"\n{GREEN}▶  Service started.{RESET}")
+
+
+def menu_stop_service():
+    if service_status() != "active":
+        print(f"\n{DIM}Service is not running.{RESET}")
+        return
+    subprocess.run(["systemctl", "--user", "stop", SERVICE])
+    print(f"\n{YELLOW}⏹  Service stopped.{RESET}")
 
 
 def apply_config(cfg):
@@ -161,8 +168,6 @@ def main():
         print_status(cfg)
         mode_label = ("Switch to dim (hardware brightness)"
                       if cfg["use_overlay"] else "Switch to overlay (black window)")
-        svc_label  = ("Stop service"
-                      if service_status() == "active" else "Start service")
         vlc_label  = ("Disable VLC fullscreen detection"
                       if cfg["vlc_fullscreen"] else "Enable VLC fullscreen detection")
 
@@ -171,8 +176,9 @@ def main():
         print(f"  {BOLD}3{RESET}  Test dim")
         print(f"  {BOLD}4{RESET}  {mode_label}")
         print(f"  {BOLD}5{RESET}  {vlc_label}")
-        print(f"  {BOLD}6{RESET}  {svc_label}")
-        print(f"  {BOLD}7{RESET}  Save and exit")
+        print(f"  {BOLD}6{RESET}  Start service")
+        print(f"  {BOLD}7{RESET}  Stop service")
+        print(f"  {BOLD}8{RESET}  Save and exit")
         print(f"  {BOLD}q{RESET}  Quit without saving\n")
 
         choice = input(f"{CYAN}Choose option: {RESET}").strip().lower()
@@ -195,8 +201,10 @@ def main():
             state = "enabled" if cfg["vlc_fullscreen"] else "disabled"
             print(f"{GREEN}✓ VLC fullscreen detection {state}.{RESET}")
         elif choice == "6":
-            menu_toggle_service()
+            menu_start_service()
         elif choice == "7":
+            menu_stop_service()
+        elif choice == "8":
             apply_config(cfg)
             break
         elif choice == "q":

@@ -16,7 +16,6 @@ except ImportError:
 CONFIG_FILE = Path.home() / ".config/monitor-dimmer.conf"
 OVERLAY_BIN = Path.home() / ".local/bin/monitor-dimmer-overlay"
 
-auto_enabled = True
 game_active  = False
 overlay_proc = None
 lock         = threading.Lock()
@@ -79,6 +78,14 @@ def is_vlc_fullscreen():
         return False
 
 
+_STEAM_HELPER_PATHS = (
+    "/ubuntu12_32/",
+    "/ubuntu12_64/",
+    "/.steam/root/",
+    "/steam-runtime/",
+    "/pressure-vessel/",
+)
+
 def _has_steam_game_id(pid_dir):
     """Check if process has SteamGameId env var set to a non-zero value (i.e. it's a game, not the Steam client)."""
     try:
@@ -88,21 +95,52 @@ def _has_steam_game_id(pid_dir):
         for entry in environ.split(b"\x00"):
             if entry.startswith(b"SteamGameId="):
                 val = entry.split(b"=", 1)[1]
-                return val.isdigit() and int(val) > 0
+                if not (val.isdigit() and int(val) > 0):
+                    return False
+                try:
+                    exe = os.readlink(pid_dir / "exe")
+                    if any(p in exe for p in _STEAM_HELPER_PATHS):
+                        return False
+                except OSError:
+                    pass
+                return True
     except OSError:
         pass
     return False
 
 
-def is_game_running():
+def _is_exclusive_fullscreen():
+    """Return True if any XWayland window has _NET_WM_STATE_FULLSCREEN set."""
+    try:
+        out = subprocess.check_output(
+            ["xdotool", "search", "--onlyvisible", "--name", ""],
+            stderr=subprocess.DEVNULL, text=True, timeout=3
+        ).strip().splitlines()
+        for wid in out:
+            wid = wid.strip()
+            if not wid:
+                continue
+            try:
+                props = subprocess.check_output(
+                    ["xprop", "-id", wid, "_NET_WM_STATE"],
+                    stderr=subprocess.DEVNULL, text=True, timeout=2
+                )
+                if "_NET_WM_STATE_FULLSCREEN" in props:
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
+def _is_game_process_running():
     for pid_dir in Path("/proc").iterdir():
         if not pid_dir.name.isdigit():
             continue
         try:
-            # Steam games via Proton/Wine: check SteamGameId env var
             if _has_steam_game_id(pid_dir):
                 return True
-            # Native games or Heroic: check exe and cmdline for game paths
             if GAME_PATHS:
                 exe = os.readlink(pid_dir / "exe")
                 if any(p in exe for p in GAME_PATHS):
@@ -112,7 +150,13 @@ def is_game_running():
                     return True
         except OSError:
             continue
-    return is_vlc_fullscreen()
+    return False
+
+
+def is_game_running():
+    if not _is_game_process_running():
+        return is_vlc_fullscreen()
+    return _is_exclusive_fullscreen()
 
 
 def start_overlay():
@@ -132,6 +176,10 @@ def stop_overlay():
     global overlay_proc
     if overlay_proc and overlay_proc.poll() is None:
         overlay_proc.terminate()
+        try:
+            overlay_proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            overlay_proc.kill()
     overlay_proc = None
 
 
@@ -189,10 +237,7 @@ def monitor_loop(icon):
     while True:
         time.sleep(POLL_INTERVAL)
         with lock:
-            enabled     = auto_enabled
-            was_active  = game_active
-        if not enabled:
-            continue
+            was_active = game_active
         running = is_game_running()
         with lock:
             game_active = running
@@ -202,21 +247,28 @@ def monitor_loop(icon):
             dim_off()
 
 
-def on_toggle(icon, item):
-    global auto_enabled
+def on_toggle_mode(icon, item):
+    global USE_OVERLAY
     with lock:
-        auto_enabled = not auto_enabled
-        enabled = auto_enabled
-        running = game_active
-    icon.icon = make_icon(enabled)
-    if not enabled:
+        currently_dimming = game_active
+    if currently_dimming:
         dim_off()
-    elif running:
+    USE_OVERLAY = not USE_OVERLAY
+    icon.update_menu()
+    if currently_dimming:
         dim_on()
 
 
-def on_restore(icon, item):
-    dim_off()
+def on_settings(icon, item):
+    config_bin = Path.home() / ".local/bin/dimmer"
+    cmd = f"python3 {config_bin}; read -p 'Press Enter to close...'"
+    for term in ("konsole", "gnome-terminal", "xterm"):
+        try:
+            subprocess.Popen([term, "-e", "bash", "-c", cmd],
+                             start_new_session=True)
+            return
+        except FileNotFoundError:
+            continue
 
 
 def on_quit(icon, item):
@@ -230,8 +282,11 @@ def main():
     icon.icon = make_icon(True)
     icon.title = "Monitor Dimmer"
     icon.menu = pystray.Menu(
-        pystray.MenuItem("Auto-dim", on_toggle, checked=lambda item: auto_enabled),
-        pystray.MenuItem("Restore full brightness", on_restore),
+        pystray.MenuItem(
+            lambda item: "Mode: Overlay" if USE_OVERLAY else "Mode: DDC Brightness",
+            on_toggle_mode,
+        ),
+        pystray.MenuItem("Settings", on_settings),
         pystray.MenuItem("Quit", on_quit),
     )
     t = threading.Thread(target=monitor_loop, args=(icon,), daemon=True)

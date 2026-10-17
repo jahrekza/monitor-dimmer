@@ -15,7 +15,7 @@ Automatically dims your secondary monitor when you launch a game or play fullscr
   - **Black overlay** *(recommended)* — a borderless black window covers the screen, zero flicker, can go fully black
   - **Hardware brightness** — controls monitor brightness via DDC/CI (`ddcutil`)
 - **Works with borderless windowed games** — detection is process-based, not window-state-based
-- **System tray icon** — toggle auto-dim on/off, restore brightness, quit
+- **System tray icon** — switch dim mode, open settings, quit
 - **Terminal config wizard** — change intensity, poll interval, dimming mode at any time
 - **Starts automatically** at login via systemd user service
 - **Interactive installer** — detects your monitors, game libraries, and walks you through setup
@@ -91,8 +91,8 @@ Once installed the daemon runs silently in the background.
 
 Look for the moon icon (🌙) in your taskbar. If it's hidden, click the `▲` arrow to expand hidden icons. Right-click for options:
 
-- **Auto-dim** — toggle the feature on/off
-- **Restore full brightness** — instant restore without disabling auto-dim
+- **Mode** — switch between overlay and DDC brightness
+- **Settings** — open the configuration wizard
 - **Quit** — stop the daemon
 
 ### Configuration wizard
@@ -109,6 +109,8 @@ Options available:
 | Poll interval | How often to check if a game is running (seconds) |
 | Dim method | Overlay (black window) or dim (hardware brightness via ddcutil) |
 | VLC detection | Enable/disable fullscreen VLC triggering |
+| Start service | Start the systemd user service |
+| Stop service | Stop the systemd user service |
 
 ---
 
