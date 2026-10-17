@@ -5,7 +5,6 @@
     monitor-dimmer --uninstall   remove Monitor Dimmer (runs the installed uninstaller)
 """
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -14,7 +13,8 @@ import time
 from pathlib import Path
 
 import dimmer_common as dc
-from fullscreen_watch import FullscreenWatcher
+
+backend = dc.backend
 
 CFG = dc.load_config()
 CFG_MTIME = dc.config_mtime()
@@ -24,102 +24,13 @@ detected    = None               # what triggered the dim: "game", "VLC", "video
 force_on    = False              # "Dim now" from the tray
 monitors    = []                 # connected monitors, refreshed on demand
 overlays    = {}                 # dc.screen_key(screen) -> overlay Popen
-watcher     = FullscreenWatcher(dc.STATE_DIR / "kwin-fullscreen.js")
+watcher     = backend.FullscreenWatcher(dc.STATE_DIR / "kwin-fullscreen.js")
 tray        = None
 
 
 # ── Detection ─────────────────────────────────────────────────────────────────
 
-def is_vlc_fullscreen():
-    try:
-        names = subprocess.run(
-            ["gdbus", "call", "--session", "--dest", "org.freedesktop.DBus",
-             "--object-path", "/org/freedesktop/DBus",
-             "--method", "org.freedesktop.DBus.ListNames"],
-            capture_output=True, text=True, timeout=2).stdout
-        # one name per VLC window: org.mpris.MediaPlayer2.vlc[.instanceNNN]
-        for name in set(re.findall(r"org\.mpris\.MediaPlayer2\.vlc[\w.]*", names)):
-            r = subprocess.run(
-                ["gdbus", "call", "--session", "--dest", name,
-                 "--object-path", "/org/mpris/MediaPlayer2",
-                 "--method", "org.freedesktop.DBus.Properties.Get",
-                 "org.mpris.MediaPlayer2", "Fullscreen"],
-                capture_output=True, text=True, timeout=2)
-            if "true" in r.stdout:
-                return True
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    return False
-
-
-_STEAM_HELPER_PATHS = (
-    "/ubuntu12_32/",
-    "/ubuntu12_64/",
-    "/.steam/root/",
-    "/steam-runtime/",
-    "/pressure-vessel/",
-)
-
-def _has_steam_game_id(pid_dir):
-    """Check if process has SteamGameId env var set to a non-zero value (i.e. it's a game, not the Steam client)."""
-    try:
-        environ = (pid_dir / "environ").read_bytes()
-        if b"SteamGameId=" not in environ:
-            return False
-        for entry in environ.split(b"\x00"):
-            if entry.startswith(b"SteamGameId="):
-                val = entry.split(b"=", 1)[1]
-                if not (val.isdigit() and int(val) > 0):
-                    return False
-                try:
-                    exe = os.readlink(pid_dir / "exe")
-                    if any(p in exe for p in _STEAM_HELPER_PATHS):
-                        return False
-                except OSError:
-                    pass
-                return True
-    except OSError:
-        pass
-    return False
-
-
-def game_dirs():
-    # /proc/*/exe is fully resolved: on Fedora Atomic /home is a symlink to
-    # /var/home, so match both the configured and the resolved spelling
-    return sorted({d.rstrip("/") + "/" for p in CFG["game_paths"]
-                   for d in (p, os.path.realpath(p))})
-
-GAME_DIRS = game_dirs()
-
-def _in_game_dir(path):
-    return any(path.startswith(d) for d in GAME_DIRS)
-
-
-def _is_game_launch_arg(arg):
-    # Wine shows the game as "Z:\home\...\game.exe"; only count executables,
-    # so a file manager or shell sitting in a game folder doesn't trigger
-    arg = arg.replace("\\", "/")
-    if arg[1:3] == ":/":
-        arg = arg[2:]
-    return arg.lower().endswith(".exe") and _in_game_dir(arg)
-
-
-def _is_game_process_running():
-    for pid_dir in Path("/proc").iterdir():
-        if not pid_dir.name.isdigit():
-            continue
-        try:
-            if _has_steam_game_id(pid_dir):
-                return True
-            if GAME_DIRS:
-                if _in_game_dir(os.readlink(pid_dir / "exe")):
-                    return True
-                args = (pid_dir / "cmdline").read_bytes().decode("utf-8", errors="ignore")
-                if any(_is_game_launch_arg(a) for a in args.split("\x00")):
-                    return True
-        except OSError:
-            continue
-    return False
+GAME_DIRS = backend.game_dirs(CFG["game_paths"])
 
 
 def detect():
@@ -136,11 +47,11 @@ def detect():
                 fullscreen = [w for w in fullscreen if w["pid"] not in ours]
         return fullscreen
 
-    if CFG["detect_games"] and _is_game_process_running():
+    if CFG["detect_games"] and backend.game_running(GAME_DIRS):
         # Unknown window state (no KWin, no xdotool) counts as fullscreen
         if not CFG["require_fullscreen"] or windows() is None or windows():
             return "game"
-    if CFG["vlc_fullscreen"] and is_vlc_fullscreen():
+    if CFG["vlc_fullscreen"] and backend.vlc_fullscreen(windows):
         return "VLC"
     if CFG["video_fullscreen"] and CFG["video_titles"]:
         for w in windows() or []:
@@ -250,7 +161,7 @@ def reload_config_if_changed():
         CFG_MTIME = mtime
         CFG.clear()
         CFG.update(dc.load_config())
-        GAME_DIRS = game_dirs()
+        GAME_DIRS = backend.game_dirs(CFG["game_paths"])
     return True
 
 
@@ -258,6 +169,8 @@ def monitor_loop():
     global detected
     while True:
         time.sleep(CFG["poll_interval"])
+        if backend.stop_requested():
+            shutdown()
         watcher.check()
         reloaded = reload_config_if_changed()
         now = detect() if CFG["auto_dim"] else None
@@ -405,13 +318,14 @@ def screen_menu(pystray):
 
 def on_settings(icon, item):
     wizard = Path(__file__).resolve().parent / "dimmer"
-    if not dc.open_in_terminal([sys.executable, str(wizard)]):
+    if not backend.open_in_terminal([sys.executable, str(wizard)]):
         dc.warn("no terminal emulator found — run `dimmer` from a terminal")
 
 
 def shutdown(*_):
     undim_all()
     watcher.stop()
+    backend.unregister_daemon()
     os._exit(0)
 
 
@@ -500,12 +414,14 @@ def main():
             sys.exit(f"{uninstaller} not found — run uninstall.py from the download folder")
         os.execv(sys.executable, [sys.executable, str(uninstaller)])
 
+    backend.register_daemon()
     restore_leftover_dim()
     migrate_config()
-    signal.signal(signal.SIGTERM, shutdown)
-    signal.signal(signal.SIGINT, shutdown)
+    for sig in ("SIGTERM", "SIGINT", "SIGBREAK"):     # SIGBREAK: Windows Ctrl+Break
+        if hasattr(signal, sig):
+            signal.signal(getattr(signal, sig), shutdown)
     if not watcher.start():
-        dc.warn("KWin not available; fullscreen windows are read via xdotool/xprop")
+        dc.warn("fullscreen windows are polled (no push watcher on this desktop)")
     refresh_monitors()
     threading.Thread(target=monitor_loop, daemon=True).start()
 
@@ -516,8 +432,8 @@ def main():
         except Exception as e:
             # e.g. no notification service / no tray host on this desktop
             dc.warn(f"tray icon failed ({e}); running without it")
-    while True:
-        signal.pause()
+    while True:                       # no tray: the monitor thread does the work
+        time.sleep(3600)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ import time
 
 import dimmer_common as dc
 
-SERVICE = "monitor-dimmer.service"
+backend = dc.backend
 
 RESET  = "\033[0m"
 BOLD   = "\033[1m"
@@ -55,22 +55,8 @@ class Settings:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def systemctl(*args):
-    try:
-        return subprocess.run(["systemctl", "--user", *args, SERVICE],
-                              capture_output=True, text=True)
-    except OSError:
-        return None
-
-
-def service_status():
-    r = systemctl("is-active")
-    return r.stdout.strip() if r else "unknown"
-
-
-def autostart_enabled():
-    r = systemctl("is-enabled")
-    return bool(r) and r.stdout.strip() == "enabled"
+service_status    = backend.service_status
+autostart_enabled = backend.autostart_enabled
 
 
 def ask(prompt, default=""):
@@ -297,13 +283,14 @@ def menu_service():
         item(4, "Start at login", on_off(autostart_enabled()))
         item(0, "Back")
         choice = ask("\n  Choose")
-        actions = {"1": ("start",), "2": ("stop",), "3": ("restart",),
-                   "4": ("disable",) if autostart_enabled() else ("enable",)}
+        actions = {"1": lambda: backend.service_action("start"),
+                   "2": lambda: backend.service_action("stop"),
+                   "3": lambda: backend.service_action("restart"),
+                   "4": lambda: backend.set_autostart(not autostart_enabled())}
         if choice in actions:
-            r = systemctl(*actions[choice])
-            if r is None or r.returncode != 0:
-                print(f"{RED}  systemctl {actions[choice][0]} failed"
-                      f"{': ' + r.stderr.strip() if r else ''}{RESET}")
+            error = actions[choice]()
+            if error:
+                print(f"{RED}  {error}{RESET}")
         elif choice in ("0", ""):
             return
 
@@ -384,6 +371,8 @@ def main():
 
 
 if __name__ == "__main__":
+    if os.name == "nt":
+        os.system("")                           # turn on ANSI colours in the Windows console
     if "--test" in sys.argv[1:]:                # used by install.py
         sys.exit(0 if menu_test_dim(dc.load_config()) else 1)
     try:

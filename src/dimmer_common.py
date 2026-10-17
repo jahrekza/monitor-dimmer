@@ -1,14 +1,19 @@
-"""Shared code for the Monitor Dimmer daemon, config wizard and installer."""
+"""Shared, OS-independent code for the Monitor Dimmer daemon, settings and
+installer. Everything that talks to the operating system lives in the
+backend module picked below (backend_linux.py / backend_windows.py)."""
 import json
-import os
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-CONFIG_FILE = Path.home() / ".config/monitor-dimmer.conf"
-STATE_DIR   = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "monitor-dimmer"
+if sys.platform == "win32":
+    import backend_windows as backend
+else:
+    import backend_linux as backend
+
+CONFIG_FILE = backend.CONFIG_FILE
+STATE_DIR   = backend.STATE_DIR
 STATE_FILE  = STATE_DIR / "brightness.json"
 HERE        = Path(__file__).resolve().parent
 OVERLAY_BIN = HERE / "monitor-dimmer-overlay"
@@ -179,7 +184,7 @@ def screen_label(s):
     name = " ".join(x for x in (s.get("mfg"), s.get("model")) if x) or "Unknown monitor"
     extra = [s["connector"]] if s.get("connector") else []
     if s.get("bus") is not None:
-        extra.append(f"i2c-{s['bus']}")
+        extra.append(backend.ddc_label(s["bus"]))
     return f"{name} ({', '.join(extra)})" if extra else name
 
 
@@ -194,36 +199,9 @@ def screens_label(cfg):
 
 # ── Monitors ──────────────────────────────────────────────────────────────────
 
-def ddc_displays():
-    """Monitors that answer DDC/CI, as [{bus, connector, mfg, model, sn}]."""
-    try:
-        out = subprocess.run(["ddcutil", "detect"], capture_output=True,
-                             text=True, timeout=30).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    displays, current = [], None
-    for line in out.splitlines():
-        if re.match(r"^Display \d+", line):
-            current = {}
-            displays.append(current)
-        elif re.match(r"^\S", line):
-            current = None                       # "Invalid display": no DDC/CI
-        elif current is None:
-            continue
-        elif "I2C bus:" in line:
-            m = re.search(r"/dev/i2c-(\d+)", line)
-            if m:
-                current["bus"] = int(m.group(1))
-        elif re.search(r"DRM[ _]connector:", line):   # "DRM_connector:" in full output
-            # "card1-DP-3" -> "DP-3", the name compositors use
-            current["connector"] = re.sub(r"^card\d+-", "", line.split(":", 1)[1].strip())
-        elif "Mfg id:" in line:
-            current["mfg"] = line.split(":", 1)[1].split(" - ")[0].strip()
-        elif "Model:" in line:
-            current["model"] = line.split(":", 1)[1].strip()
-        elif "Serial number:" in line:
-            current["sn"] = line.split(":", 1)[1].strip()
-    return [d for d in displays if "bus" in d]
+ddc_displays   = backend.ddc_displays
+get_brightness = backend.get_brightness
+set_brightness = backend.set_brightness
 
 
 def qt_screens(python=None):
@@ -322,26 +300,6 @@ def overlay_args(screen):
 
 # ── DDC brightness ────────────────────────────────────────────────────────────
 
-def get_brightness(bus):
-    """Return (current, max) brightness, or None."""
-    try:
-        out = subprocess.run(["ddcutil", "getvcp", "10", "--brief", "--bus", str(bus)],
-                             capture_output=True, text=True, timeout=10).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    m = re.search(r"VCP 10 C (\d+) (\d+)", out)
-    return (int(m.group(1)), int(m.group(2))) if m else None
-
-
-def set_brightness(bus, value):
-    try:
-        r = subprocess.run(["ddcutil", "setvcp", "10", str(value), "--bus", str(bus)],
-                           capture_output=True, text=True, timeout=10)
-        return r.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-
-
 def dimmed_value(current, dim_level):
     return max(0, round(current * (100 - dim_level) / 100))
 
@@ -369,35 +327,3 @@ def save_state(state):
         return
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state))
-
-
-# ── Terminal ──────────────────────────────────────────────────────────────────
-
-# How each terminal takes a command to run
-TERMINALS = [
-    ("xdg-terminal-exec", []),
-    ("konsole",           ["-e"]),
-    ("ptyxis",            ["--"]),
-    ("kgx",               ["--"]),
-    ("gnome-terminal",    ["--"]),
-    ("xfce4-terminal",    ["-x"]),
-    ("alacritty",         ["-e"]),
-    ("kitty",             []),
-    ("foot",              []),
-    ("wezterm",           ["start", "--"]),
-    ("x-terminal-emulator", ["-e"]),
-    ("xterm",             ["-e"]),
-]
-
-
-def open_in_terminal(cmd):
-    """Run `cmd` (a list) in a new terminal window. Returns True on success."""
-    candidates = list(TERMINALS)
-    user = os.environ.get("TERMINAL")
-    if user:
-        candidates.insert(0, (user, dict(TERMINALS).get(Path(user).name, ["-e"])))
-    for term, flag in candidates:
-        if shutil.which(term):
-            subprocess.Popen([term, *flag, *cmd], start_new_session=True)
-            return True
-    return False

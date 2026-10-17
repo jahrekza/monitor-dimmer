@@ -33,7 +33,8 @@ SVG_DEST    = ICONS_DIR / "hicolor/scalable/apps/monitor-dimmer-symbolic.svg"
 KDE_STATS   = HOME / ".config/kactivitymanagerd-statsrc"
 
 PROGRAMS = ["monitor-dimmer", "monitor-dimmer-overlay", "dimmer"]
-MODULES  = ["dimmer_common.py", "fullscreen_watch.py"]
+MODULES  = ["dimmer_common.py", "backend_linux.py", "backend_windows.py"]
+OBSOLETE = ["fullscreen_watch.py"]          # merged into backend_linux.py in 2.2
 
 sys.path.insert(0, str(SRC_DIR))
 import dimmer_common as dc  # noqa: E402
@@ -431,6 +432,8 @@ def install_scripts():
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     for name in PROGRAMS + MODULES:
         shutil.copy2(SRC_DIR / name, APP_HOME / name)
+    for name in OBSOLETE:
+        (APP_HOME / name).unlink(missing_ok=True)
     # so `monitor-dimmer --uninstall` works after the download folder is gone
     shutil.copy2(REPO_DIR / "uninstall.py", APP_HOME / "uninstall.py")
     # Launchers in ~/.local/bin run the programs with the private venv

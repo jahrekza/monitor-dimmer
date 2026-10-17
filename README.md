@@ -215,6 +215,19 @@ Placing a window on a chosen screen is up to the compositor: KDE Plasma and X11 
 
 **Hardware brightness** reads the monitor's current brightness, lowers it by the dim intensity (70% dim of brightness 60 → 18) and restores the saved value afterwards. The saved value is kept in `~/.local/state/monitor-dimmer/` until it has been restored, so a crash or `systemctl stop` mid-game doesn't leave the screen dark.
 
+### Project structure
+
+| File | Role |
+|------|------|
+| `src/monitor-dimmer` | Daemon: detection loop, dimming, tray menu |
+| `src/monitor-dimmer-overlay` | Overlay window (PyQt6), also lists the screens |
+| `src/dimmer` | Settings wizard |
+| `src/dimmer_common.py` | OS-independent logic: config, screen matching, video sites, levels, saved brightness |
+| `src/backend_linux.py` | Everything Linux-specific: ddcutil, `/proc` + Steam, VLC over MPRIS, KWin script / xprop, systemd, terminals |
+| `src/backend_windows.py` | The same interface on Win32 APIs — **work in progress, not tested yet** |
+
+The daemon, settings and installer reach the operating system only through the backend, which `dimmer_common.py` picks by platform.
+
 ---
 
 ## File locations
