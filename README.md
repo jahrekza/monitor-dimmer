@@ -65,7 +65,9 @@ sudo usermod -aG i2c $USER   # then log out and back in
 
 ## Installation
 
-Run it from your desktop session (the installer asks the compositor for the list of screens):
+Run it in a terminal from your desktop session (the installer asks the compositor for the list of screens). Both ways below download into a new `monitor-dimmer` folder inside the current directory — it doesn't need to exist beforehand.
+
+**With git**
 
 ```bash
 git clone https://github.com/jahrekza/monitor-dimmer
@@ -73,24 +75,36 @@ cd monitor-dimmer
 python3 install.py
 ```
 
+**Without git**
+
+```bash
+mkdir monitor-dimmer
+curl -L https://github.com/jahrekza/monitor-dimmer/archive/refs/heads/main.tar.gz | tar xz -C monitor-dimmer --strip-components=1
+cd monitor-dimmer
+python3 install.py
+```
+
 The installer will:
 1. Check optional system tools and create the private Python environment
-2. Ask for the dimming method, then let you pick the screens to dim
-3. Detect Steam libraries (native and Flatpak) and Heroic install folders
-4. Ask about intensity, poll interval, VLC, YouTube and fullscreen-only detection
+2. Let you pick the screens to dim and how (overlay or hardware brightness, per screen)
+3. Ask what to detect: games (with Steam libraries and Heroic folders found automatically), VLC, video sites
+4. Ask for the poll interval and whether to start at login
 5. Install the programs, create a systemd user service, and add a desktop entry
 6. Optionally add to KDE application launcher favorites
 7. Run a quick dim test so you can see the effect immediately
 
+Everything is installed to your home directory (see [File locations](#file-locations)), so the download folder can be deleted afterwards.
+
 ### Updating
 
+In the download folder:
+
 ```bash
-cd monitor-dimmer
-git pull
+git pull            # or, without git, run the curl command from above again
 python3 install.py
 ```
 
-The installer offers to keep your current settings and only update the program.
+If you deleted the folder, download it again as described above and run `python3 install.py`. The installer offers to keep your current settings and only update the program.
 
 ---
 
@@ -210,7 +224,7 @@ Placing a window on a chosen screen is up to the compositor: KDE Plasma and X11 
 | `~/.local/bin/monitor-dimmer` | Daemon launcher (`--restore` undoes a leftover dim) |
 | `~/.local/bin/monitor-dimmer-overlay` | Overlay window launcher (`--list` prints the screens) |
 | `~/.local/bin/dimmer` | Configuration wizard launcher |
-| `~/.local/share/monitor-dimmer/` | Programs and their private Python environment |
+| `~/.local/share/monitor-dimmer/` | Programs, the uninstaller and their private Python environment |
 | `~/.local/state/monitor-dimmer/` | Brightness to restore while a DDC dim is active |
 | `~/.config/monitor-dimmer.conf` | Configuration file |
 | `~/.config/systemd/user/monitor-dimmer.service` | Systemd user service |
@@ -250,10 +264,10 @@ screen2_model=LG TV
 ## Uninstall
 
 ```bash
-python3 uninstall.py
+monitor-dimmer --uninstall
 ```
 
-Stops the service (restoring brightness if a monitor is dimmed), removes all installed files, the private Python environment, the config and the desktop entry.
+(or `python3 uninstall.py` in the download folder). It stops the service (restoring brightness if a monitor is dimmed), removes all installed files, the private Python environment, the config and the desktop entry.
 
 ---
 

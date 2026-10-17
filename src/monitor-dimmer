@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Monitor Dimmer daemon. `monitor-dimmer --restore` undoes a leftover DDC dim."""
+"""Monitor Dimmer daemon.
+
+    monitor-dimmer --restore     undo a leftover DDC dim
+    monitor-dimmer --uninstall   remove Monitor Dimmer (runs the installed uninstaller)
+"""
 import os
 import re
 import signal
@@ -490,6 +494,11 @@ def main():
     if "--restore" in sys.argv[1:]:
         restore_leftover_dim()
         return
+    if "--uninstall" in sys.argv[1:]:
+        uninstaller = Path(__file__).resolve().parent / "uninstall.py"
+        if not uninstaller.exists():
+            sys.exit(f"{uninstaller} not found — run uninstall.py from the download folder")
+        os.execv(sys.executable, [sys.executable, str(uninstaller)])
 
     restore_leftover_dim()
     migrate_config()

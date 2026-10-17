@@ -431,6 +431,8 @@ def install_scripts():
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     for name in PROGRAMS + MODULES:
         shutil.copy2(SRC_DIR / name, APP_HOME / name)
+    # so `monitor-dimmer --uninstall` works after the download folder is gone
+    shutil.copy2(REPO_DIR / "uninstall.py", APP_HOME / "uninstall.py")
     # Launchers in ~/.local/bin run the programs with the private venv
     for name in PROGRAMS:
         (APP_HOME / name).chmod(0o755)
@@ -616,8 +618,9 @@ def main():
   • System tray icon: auto-dim, dim now, screens and detection
     (it may be hidden — click ▲ in the taskbar)
   • All settings: run {B}dimmer{R}
-  • To update:    git pull, then run this installer again
-  • To uninstall: run {B}python3 {REPO_DIR}/uninstall.py{R}
+  • To update:    git pull (or download again), then run this installer again
+  • To uninstall: run {B}monitor-dimmer --uninstall{R}
+  • This download folder is no longer needed and can be deleted
 """)
 
 
