@@ -46,7 +46,9 @@ def main():
     print(f"\n{B}Monitor Dimmer — Uninstaller{R}\n")
 
     files, dirs = backend.uninstall_items()
-    if not ask_yes_no("Remove Monitor Dimmer and all its files?", default=False):
+    unattended = "--yes" in sys.argv[1:]        # for scripted removals
+    if not unattended and not ask_yes_no(
+            "Remove Monitor Dimmer and all its files?", default=False):
         print("  Cancelled.\n")
         return
 

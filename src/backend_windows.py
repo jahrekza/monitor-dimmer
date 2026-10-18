@@ -14,8 +14,10 @@ import functools
 import os
 import shutil
 import subprocess
+import tempfile
 import sys
 import time
+import pathlib
 from ctypes import wintypes
 from pathlib import Path
 
@@ -31,6 +33,23 @@ HERE        = Path(__file__).resolve().parent
 
 RUN_KEY   = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "MonitorDimmer"
+
+# Built into executables there is no interpreter and no .py file: each
+# program is an .exe sitting beside the others.
+FROZEN = bool(getattr(sys, "frozen", False))
+EXE    = ".exe" if FROZEN else ""
+
+
+APP_EXE = "MonitorDimmer.exe"
+
+
+def _program_dir():
+    """Folder our own programs live in right now — the installer's payload
+    while the downloadable installer is running, otherwise next to us."""
+    if not FROZEN:
+        return HERE
+    payload = Path(getattr(sys, "_MEIPASS", sys.executable)) / "app"
+    return payload if payload.is_dir() else Path(sys.executable).resolve().parent
 
 
 # ── Structures ────────────────────────────────────────────────────────────────
@@ -408,6 +427,9 @@ def _pythonw():
 
 
 def _daemon_cmd():
+    """How to start the daemon from where we are now."""
+    if FROZEN:
+        return [str(_program_dir() / APP_EXE), "--role", "daemon"]
     return [_pythonw(), str(HERE / "monitor-dimmer")]
 
 
@@ -651,6 +673,33 @@ def spawn_overlay(cmd):
 
 # ── Console ───────────────────────────────────────────────────────────────────
 
+ATTACH_PARENT_PROCESS = -1
+
+
+def _ensure_console():
+    """Give a windowed build a console to talk in.
+
+    The application is built without one so the daemon and the overlay never
+    flash a black window. The settings wizard, the installer and the
+    uninstaller do need somewhere to print and read: borrow the console of
+    whoever started us, or open one of our own.
+    """
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    if not k32.GetConsoleWindow():
+        if not k32.AttachConsole(ATTACH_PARENT_PROCESS) and not k32.AllocConsole():
+            return
+    if sys.stdin and sys.stdout and sys.stderr:
+        return                       # already wired up, leave the pipes alone
+    try:
+        sys.stdin  = open("CONIN$", "r", encoding="utf-8", errors="replace")
+        sys.stdout = open("CONOUT$", "w", encoding="utf-8", errors="replace",
+                          buffering=1)
+        sys.stderr = open("CONOUT$", "w", encoding="utf-8", errors="replace",
+                          buffering=1)
+    except OSError:
+        pass
+
+
 def prepare_console():
     """Make this console able to show the settings wizard.
 
@@ -660,6 +709,8 @@ def prepare_console():
     raises UnicodeEncodeError before the first screen is drawn. Switch the
     streams to UTF-8 and ask the console to interpret escapes.
     """
+    if FROZEN:
+        _ensure_console()
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
@@ -730,14 +781,21 @@ def install_hint(keys):
     return None
 
 
-def _daemon_target():
-    """(interpreter, script) of the installed daemon, windowless."""
+def _daemon_argv():
+    """How to start the *installed* daemon, windowless."""
+    if FROZEN:
+        return [str(APP_HOME / APP_EXE), "--role", "daemon"]
     py = VENV_PYW if VENV_PYW.exists() else VENV_PY
-    return str(py), str(APP_HOME / "monitor-dimmer")
+    return [str(py), str(APP_HOME / "monitor-dimmer")]
 
 
 def write_launchers(programs):
-    """A .cmd per program, so they can be run from a terminal if wanted."""
+    """A .cmd per program, so they can be run from a terminal if wanted.
+
+    A frozen build needs none: the programs are already executables.
+    """
+    if FROZEN:
+        return []
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     written = []
     for name in programs:
@@ -759,6 +817,13 @@ def install_icons(assets_dir):
     Shortcuts want an .ico and the repo ships a .png, so convert it. Pillow
     lands in the virtualenv during setup, so this runs after it.
     """
+    if FROZEN:
+        # The build already placed the .ico beside the programs
+        shipped = _program_dir() / ICON_DEST.name
+        if shipped.exists() and shipped != ICON_DEST:
+            shutil.copy2(shipped, ICON_DEST)
+        return (ICON_DEST, ["App icon installed to %s" % ICON_DEST]) if ICON_DEST.exists() \
+            else (None, [])
     png = assets_dir / "dimmer.png"
     if not png.exists():
         return None, []
@@ -782,8 +847,9 @@ def post_venv_check(venv_py):
 
 
 def path_warning():
+    target = (APP_HOME / APP_EXE) if FROZEN else (BIN_DIR / "dimmer.cmd")
     return ("%s is not on your PATH — run the wizard from the Start menu, "
-            "or as %s" % (BIN_DIR, BIN_DIR / "dimmer.cmd"))
+            "or as %s" % (target.parent, target))
 
 
 def favorites_prompt():
@@ -795,15 +861,19 @@ def add_to_favorites():
     return None
 
 
-def uninstaller_python():
-    """Interpreter to run the uninstaller with.
+def uninstall_command():
+    """How to run the uninstaller so that it can delete the install folder.
 
-    Windows refuses to delete a running executable, and the virtualenv's
-    python.exe sits inside the very folder we are about to remove. A
-    virtualenv remembers the interpreter it was built from, which is
-    somewhere else, so use that one.
+    Windows refuses to delete a running executable. Both the virtualenv's
+    python.exe and, in a frozen build, the uninstaller itself live inside
+    the folder being removed — so a frozen uninstaller is copied to the
+    temporary folder first, and otherwise we use the interpreter the
+    virtualenv was built from, which is elsewhere.
     """
-    return getattr(sys, "_base_executable", None) or sys.executable
+    if FROZEN:
+        return [str(_program_dir() / APP_EXE), "--role", "uninstall"]
+    python = getattr(sys, "_base_executable", None) or sys.executable
+    return [python, str(_program_dir() / "uninstall.py")]
 
 
 def stop_for_uninstall():
@@ -819,7 +889,8 @@ def stop_for_uninstall():
 def install_menu_entry(icon=None):
     """Start menu shortcut for the settings wizard, through WScript.Shell."""
     START_MENU.parent.mkdir(parents=True, exist_ok=True)
-    target, _ = str(VENV_PY), None
+    target = str(APP_HOME / APP_EXE) if FROZEN else str(VENV_PY)
+    arguments = "--role settings" if FROZEN else '"%s"' % (APP_HOME / "dimmer")
     ps = (
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut({lnk});"
         "$s.TargetPath = {target};"
@@ -831,7 +902,7 @@ def install_menu_entry(icon=None):
     ).format(
         lnk=_ps_quote(str(START_MENU)),
         target=_ps_quote(target),
-        args=_ps_quote(f'"{APP_HOME / "dimmer"}"'),
+        args=_ps_quote(arguments),
         cwd=_ps_quote(str(APP_HOME)),
         icon=_ps_quote(str(icon)) if icon else "",
     )
@@ -848,11 +919,11 @@ def _ps_quote(text):
 def install_startup(autostart):
     """Start at login, pointing at the installed copy (not this installer)."""
     import winreg
-    py, script = _daemon_target()
+    command = " ".join('"%s"' % a for a in _daemon_argv())
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
             if autostart:
-                winreg.SetValueEx(k, RUN_VALUE, 0, winreg.REG_SZ, f'"{py}" "{script}"')
+                winreg.SetValueEx(k, RUN_VALUE, 0, winreg.REG_SZ, command)
                 return f"Starts at login (registry Run key, {RUN_VALUE})"
             try:
                 winreg.DeleteValue(k, RUN_VALUE)
@@ -866,9 +937,8 @@ def install_startup(autostart):
 def start_daemon():
     """Restart the installed daemon. Returns True once it reports itself."""
     service_action("stop")
-    py, script = _daemon_target()
     flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-    subprocess.Popen([py, script], creationflags=flags, close_fds=True)
+    subprocess.Popen(_daemon_argv(), creationflags=flags, close_fds=True)
     for _ in range(20):
         if _daemon_pid():
             return True
@@ -934,15 +1004,40 @@ def uninstall_items():
     """(files, dirs) to remove, in that order.
 
     CONFIG_FILE's folder is ours alone here, unlike ~/.config on Linux, so it
-    goes too and leaves nothing behind.
+    goes too and leaves nothing behind. The program folder is left out of a
+    frozen build's list: we are running from inside it, and Windows will not
+    delete a running executable. uninstall_cleanup() sees to it afterwards.
     """
-    return ([START_MENU, CONFIG_FILE], [APP_HOME, STATE_DIR, CONFIG_FILE.parent])
+    dirs = [STATE_DIR, CONFIG_FILE.parent]
+    if not FROZEN:
+        dirs.insert(0, APP_HOME)
+    return ([START_MENU, CONFIG_FILE], dirs)
+
+
+def _delete_after_exit(folder):
+    """Have the shell remove `folder` once we are no longer running inside it.
+
+    The work goes into a small script. Handing `cmd /c` a compound command
+    with a quoted path runs into its own quoting rules and fails with a
+    syntax error, so write the steps down instead.
+    """
+    script = pathlib.Path(tempfile.gettempdir()) / "monitor-dimmer-cleanup.cmd"
+    lines = ["@echo off",
+             "ping -n 4 127.0.0.1 >nul",
+             'rmdir /s /q "%s"' % folder,
+             'del "%~f0"']
+    script.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8", newline="")
+    flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
+    subprocess.Popen(["cmd", "/c", str(script)], creationflags=flags, close_fds=True)
 
 
 def uninstall_cleanup():
     """Whatever is left once the files are gone."""
     import winreg
     notes = []
+    if FROZEN and APP_HOME.exists():
+        _delete_after_exit(APP_HOME)
+        notes.append("%s goes as soon as this window closes" % APP_HOME)
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
             winreg.DeleteValue(k, RUN_VALUE)

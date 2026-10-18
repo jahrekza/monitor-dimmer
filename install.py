@@ -113,7 +113,9 @@ def ask_choice(prompt, options):
 def run(cmd, **kwargs):
     """subprocess.run that reports a missing program instead of crashing."""
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+        # Our own programs speak UTF-8; the locale encoding would choke
+        return subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", **kwargs)
     except FileNotFoundError:
         return subprocess.CompletedProcess(cmd, 127, "", f"{cmd[0]}: not found")
 
@@ -149,6 +151,10 @@ def setup_venv():
     """Private virtualenv for the Python packages, so nothing touches the
     system Python (pip --user is refused on PEP 668 distros). Which packages
     may come from the system instead is the backend's call."""
+    if dc.FROZEN:
+        # Built into executables: Python, the virtualenv and pip are all
+        # baked in, so there is nothing to set up.
+        return
     step("Setting up Python environment")
     if not VENV_PY.exists():
         APP_HOME.mkdir(parents=True, exist_ok=True)
@@ -343,6 +349,22 @@ def install_icons():
 
 def install_scripts():
     APP_HOME.mkdir(parents=True, exist_ok=True)
+    if dc.FROZEN:
+        source = dc.PROGRAM_DIR
+        if source != APP_HOME:
+            for item in source.iterdir():
+                dest = APP_HOME / item.name
+                if item.is_dir():
+                    shutil.copytree(item, dest, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(item, dest)
+        ok(f"Programs installed to {APP_HOME}")
+        for launcher in backend.write_launchers(PROGRAMS):
+            ok(f"Installed {launcher}")
+        note = backend.path_warning()
+        if note:
+            warn(note)
+        return
     for name in PROGRAMS + MODULES:
         shutil.copy2(SRC_DIR / name, APP_HOME / name)
     for name in OBSOLETE:
@@ -380,9 +402,17 @@ def start_service():
         warn("It may not have started — run `dimmer` and check Service")
 
 
+def installed_command(name, *args):
+    """Run one of the programs we have just installed."""
+    args = [str(a) for a in args]
+    if dc.FROZEN:
+        return [str(APP_HOME / dc.APP_EXE), "--role", dc.ROLES[name], *args]
+    return [str(VENV_PY), str(APP_HOME / name), *args]
+
+
 def test_dim():
     print(f"\n  {Y}Testing dim for 3 seconds — look at the chosen screens...{R}")
-    r = run([str(VENV_PY), str(APP_HOME / "dimmer"), "--test"])
+    r = run(installed_command("dimmer", "--test"))
     print(r.stdout, end="")
     if r.returncode != 0:
         warn("Test failed — run `dimmer` and use \"Test dim\" to investigate")
@@ -395,6 +425,17 @@ MODE_TEXT = {"off": "not dimmed", "overlay": "overlay (black window)",
 
 def on_off(v):
     return f"{G}on{R}" if v else f"{D}off{R}"
+
+
+def how_to_run():
+    """(settings, uninstall, leftover): how the user reaches us afterwards."""
+    if dc.FROZEN:
+        return ("Monitor Dimmer in the Start menu",
+                "%s --role uninstall" % (APP_HOME / dc.APP_EXE),
+                "This installer file is no longer needed and can be deleted")
+    return ("run dimmer",
+            "run monitor-dimmer --uninstall",
+            "This download folder is no longer needed and can be deleted")
 
 
 def print_summary(cfg, autostart):
@@ -448,6 +489,10 @@ def main():
 
     # 3. Install
     step("Installing")
+    # Windows will not let us overwrite the running program
+    if backend.service_status() == "active":
+        backend.service_action("stop")
+        ok("Stopped the running Monitor Dimmer")
     write_config(cfg)
     install_scripts()
     icon = install_icons()
@@ -467,15 +512,16 @@ def main():
     if ask_yes_no("\nRun a quick dim test now?"):
         test_dim()
 
+    settings_hint, uninstall_hint, leftover_hint = how_to_run()
     print(f"""
 {G}{B}✓ Installation complete!{R}
 
   • System tray icon: auto-dim, dim now, screens and detection
     (it may be hidden — click ▲ in the taskbar)
-  • All settings: run {B}dimmer{R}
-  • To update:    git pull (or download again), then run this installer again
-  • To uninstall: run {B}monitor-dimmer --uninstall{R}
-  • This download folder is no longer needed and can be deleted
+  • All settings: {B}{settings_hint}{R}
+  • To update:    run this installer again
+  • To uninstall: {B}{uninstall_hint}{R}
+  • {leftover_hint}
 """)
 
 

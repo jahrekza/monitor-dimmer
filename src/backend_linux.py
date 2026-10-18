@@ -730,11 +730,11 @@ def other_game_paths():
 
 # ── Uninstall ─────────────────────────────────────────────────────────────────
 
-def uninstaller_python():
-    """Interpreter to run the uninstaller with. The virtualenv lives inside
-    the folder being deleted, but on Linux a running program does not stop
-    its file from being removed."""
-    return sys.executable
+def uninstall_command():
+    """How to run the uninstaller. The virtualenv lives inside the folder
+    being deleted, but on Linux a running program does not stop its file
+    from being removed."""
+    return [sys.executable, str(APP_HOME / "uninstall.py")]
 
 
 def stop_for_uninstall():

@@ -72,8 +72,9 @@ def start_overlay(screen):
     p = overlays.get(overlay_key(screen))
     if p and p.poll() is None:
         return
-    cmd = [sys.executable, str(dc.OVERLAY_BIN),
-           "--opacity", str(dc.screen_level(CFG, screen) / 100), *dc.overlay_args(screen)]
+    cmd = dc.program_command("monitor-dimmer-overlay",
+                             "--opacity", dc.screen_level(CFG, screen) / 100,
+                             *dc.overlay_args(screen))
     overlays[overlay_key(screen)] = backend.spawn_overlay(cmd)
 
 
@@ -314,8 +315,7 @@ def screen_menu(pystray):
 
 
 def on_settings(icon, item):
-    wizard = Path(__file__).resolve().parent / "dimmer"
-    if not backend.open_in_terminal([sys.executable, str(wizard)]):
+    if not backend.open_in_terminal(dc.program_command("dimmer")):
         dc.warn("no terminal emulator found — run `dimmer` from a terminal")
 
 
@@ -406,11 +406,10 @@ def main():
         restore_leftover_dim()
         return
     if "--uninstall" in sys.argv[1:]:
-        uninstaller = Path(__file__).resolve().parent / "uninstall.py"
-        if not uninstaller.exists():
-            sys.exit(f"{uninstaller} not found — run uninstall.py from the download folder")
-        python = backend.uninstaller_python()
-        os.execv(python, [python, str(uninstaller)])
+        cmd = backend.uninstall_command()
+        if not Path(cmd[0]).exists():
+            sys.exit(f"{cmd[0]} not found — run the uninstaller from the download folder")
+        os.execv(cmd[0], cmd)
 
     backend.register_daemon()
     restore_leftover_dim()

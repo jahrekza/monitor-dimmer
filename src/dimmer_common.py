@@ -18,6 +18,39 @@ STATE_FILE  = STATE_DIR / "brightness.json"
 HERE        = Path(__file__).resolve().parent
 OVERLAY_BIN = HERE / "monitor-dimmer-overlay"
 
+# Frozen into executables, our programs are .exe files sitting next to each
+# other with no interpreter and no .py files in sight.
+FROZEN  = bool(getattr(sys, "frozen", False))
+APP_EXE = "MonitorDimmer.exe" if sys.platform == "win32" else "MonitorDimmer"
+
+# Which program the one executable should act as
+ROLES = {"monitor-dimmer":         "daemon",
+         "monitor-dimmer-overlay": "overlay",
+         "dimmer":                 "settings"}
+
+
+def _program_dir():
+    """Where our programs are right now.
+
+    The downloadable installer is a single file carrying the application
+    folder inside it; while it runs, that payload is what we launch.
+    """
+    if not FROZEN:
+        return HERE
+    payload = Path(getattr(sys, "_MEIPASS", sys.executable)) / "app"
+    return payload if payload.is_dir() else Path(sys.executable).resolve().parent
+
+
+PROGRAM_DIR = _program_dir()
+
+
+def program_command(name, *args):
+    """The argv that runs one of our own programs."""
+    args = [str(a) for a in args]
+    if FROZEN:
+        return [str(PROGRAM_DIR / APP_EXE), "--role", ROLES[name], *args]
+    return [sys.executable, str(HERE / name), *args]
+
 MODES        = ("off", "overlay", "ddc")
 SCREEN_KEYS  = ("mode", "level", "connector", "mfg", "model", "sn", "bus")
 LEVELS       = (30, 50, 70, 85, 100)          # offered in the tray
@@ -210,8 +243,9 @@ set_brightness = backend.set_brightness
 def qt_screens(python=None):
     """Screens as the compositor sees them, as [{connector, mfg, model, sn}]."""
     try:
-        out = subprocess.run([python or sys.executable, str(OVERLAY_BIN), "--list"],
-                             capture_output=True, text=True, timeout=15).stdout
+        cmd = (program_command("monitor-dimmer-overlay", "--list") if FROZEN or not python
+               else [python, str(OVERLAY_BIN), "--list"])
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15).stdout
         return json.loads(out)
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return []
