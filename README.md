@@ -102,6 +102,8 @@ python install.py
 
 Without git, download the repository as a ZIP, unpack it, and run `python install.py` in the unpacked folder. Nothing needs administrator rights — everything is installed for your user only.
 
+If you would rather have a single file to double-click, and no Python on the machine at all, see [Building the Windows executables](#building-the-windows-executables).
+
 ### What the installer does
 
 1. Check optional system tools and create the private Python environment
@@ -124,6 +126,32 @@ python3 install.py
 ```
 
 If you deleted the folder, download it again as described above and run `python3 install.py`. The installer offers to keep your current settings and only update the program.
+
+### Building the Windows executables
+
+Everything above needs Python on the machine. `packaging/build_windows.py` turns the project into executables that do not:
+
+```powershell
+pip install pyinstaller PyQt6 pystray pillow
+python packaging/build_windows.py
+```
+
+Two things land in `dist/`:
+
+| | |
+|---|---|
+| `MonitorDimmer/` | The application — one folder with one executable |
+| `monitor-dimmer-setup.exe` | One file carrying that folder inside it: the one to hand to someone |
+
+That single executable plays every part, and `--role` says which: `daemon`, `overlay`, `settings` or `uninstall`. With no role at all it is the installer, so double-clicking it does the obvious thing. What it installs needs neither Python nor a virtual environment, and the uninstaller removes the program folder once it has exited.
+
+**Smart App Control.** On a clean Windows 11 this is on by default, and it judges every executable by Microsoft's reputation service. A binary built minutes ago has no reputation, and Windows may simply refuse to start it:
+
+```
+OSError: [WinError 4551] An Application Control policy has blocked this file
+```
+
+with event 3118, *Smart App Control Block*, in the `Microsoft-Windows-CodeIntegrity/Operational` log. It is not a blanket ban on unsigned programs — the verdict is made per file, and most builds run until one does not. A signature from a certificate authority Microsoft trusts is the only dependable answer; a self-signed certificate does not count, and the feature cannot be turned back on once turned off. The Python installer above is unaffected, which is why both ways in are kept.
 
 ---
 
@@ -245,6 +273,9 @@ Placing a window on a chosen screen is up to the compositor: KDE Plasma and X11 
 | `src/backend_linux.py` | Everything Linux-specific: ddcutil, `/proc` + Steam, VLC over MPRIS, KWin script / xprop, systemd, terminals |
 | `src/backend_windows.py` | The same interface on Win32 APIs: DDC/CI through dxva2, monitor identity from the registry's EDID, Steam's `RunningAppID`, windows and job objects through user32/kernel32 |
 
+| `packaging/build_windows.py` | Builds the Windows executables with PyInstaller |
+| `packaging/app.py` | Entry point of that build: picks the program to run from `--role` |
+
 The daemon, settings and installer reach the operating system only through the backend, which `dimmer_common.py` picks by platform.
 
 ---
@@ -314,7 +345,13 @@ screen2_model=LG TV
 monitor-dimmer --uninstall
 ```
 
-(or `python3 uninstall.py` in the download folder). It stops the service (restoring brightness if a monitor is dimmed), removes all installed files, the private Python environment, the config and the desktop entry.
+(or `python3 uninstall.py` in the download folder). From a build made with `packaging/build_windows.py` there is no such command — use the executable instead:
+
+```powershell
+%LOCALAPPDATA%\Programs\monitor-dimmer\MonitorDimmer.exe --role uninstall
+```
+
+Add `--yes` to skip the question. Either way it stops the daemon, puts back the brightness of a monitor that was dimmed, and removes every installed file: the programs and their private Python environment, the config, the menu entry and, on Windows, the start-at-login registry key.
 
 ---
 
