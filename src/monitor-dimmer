@@ -6,7 +6,6 @@
 """
 import os
 import signal
-import subprocess
 import sys
 import threading
 import time
@@ -41,9 +40,11 @@ def detect():
         if fullscreen is False:
             fullscreen = watcher.windows()
             if fullscreen is not None:
-                # our own overlays are fullscreen windows too
+                # our own overlays are fullscreen windows too. Ask each one
+                # which pids it occupies: on Windows the process we started
+                # is a stub, and the window belongs to its child.
                 with lock:
-                    ours = {p.pid for p in overlays.values()}
+                    ours = {pid for p in overlays.values() for pid in p.pids}
                 fullscreen = [w for w in fullscreen if w["pid"] not in ours]
         return fullscreen
 
@@ -73,17 +74,13 @@ def start_overlay(screen):
         return
     cmd = [sys.executable, str(dc.OVERLAY_BIN),
            "--opacity", str(dc.screen_level(CFG, screen) / 100), *dc.overlay_args(screen)]
-    overlays[overlay_key(screen)] = subprocess.Popen(cmd)
+    overlays[overlay_key(screen)] = backend.spawn_overlay(cmd)
 
 
 def stop_overlay(key):
     p = overlays.pop(key, None)
-    if p and p.poll() is None:
-        p.terminate()
-        try:
-            p.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            p.kill()
+    if p:
+        p.stop()
 
 
 def ddc_dim(screen, state, displays):

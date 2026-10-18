@@ -409,6 +409,38 @@ TERMINALS = [
 ]
 
 
+class OverlayProcess:
+    """One overlay window. On Linux the process we start is the process whose
+    window appears, and the service manager cleans up if the daemon dies, so
+    a plain child process is all this needs."""
+
+    def __init__(self, cmd):
+        self._p = subprocess.Popen(cmd)
+
+    @property
+    def pids(self):
+        return {self._p.pid}
+
+    def poll(self):
+        return self._p.poll()
+
+    def stop(self, timeout=2):
+        if self._p.poll() is None:
+            self._p.terminate()
+            try:
+                self._p.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                self._p.kill()
+
+
+def spawn_overlay(cmd):
+    return OverlayProcess(cmd)
+
+
+def prepare_console():
+    """Nothing to do: a Linux terminal already speaks UTF-8 and ANSI."""
+
+
 def open_in_terminal(cmd):
     """Run `cmd` (a list) in a new terminal window. Returns True on success."""
     candidates = list(TERMINALS)

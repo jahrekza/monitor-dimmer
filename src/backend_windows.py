@@ -71,8 +71,30 @@ def _declare(dll, name, restype, *argtypes):
     f.restype, f.argtypes = restype, list(argtypes)
 
 
+def _set_dpi_aware():
+    """Ask for Per-Monitor-V2 DPI awareness before the first window call.
+
+    Without it Windows virtualises coordinates for this process: a monitor
+    scaled to 150% reports 2560x1440 from GetMonitorInfo while GetWindowRect
+    on a DPI-aware window (any modern game, and the Qt overlay) returns the
+    real 3840x2160. Comparing the two then decides "fullscreen" on mismatched
+    units. Declaring awareness puts everything in physical pixels.
+    """
+    user32 = ctypes.WinDLL("user32")
+    try:                                        # Windows 10 1703+
+        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except AttributeError:
+        pass
+    try:                                        # Windows 8.1: per-monitor v1
+        ctypes.WinDLL("shcore").SetProcessDpiAwareness(2)
+    except (AttributeError, OSError):
+        user32.SetProcessDPIAware()             # last resort: system DPI
+
+
 @functools.lru_cache(None)
 def _user32():
+    _set_dpi_aware()
     d = ctypes.WinDLL("user32", use_last_error=True)
     W = wintypes
     _declare(d, "EnumDisplayMonitors", W.BOOL, W.HDC, ctypes.c_void_p, MONITORENUMPROC, W.LPARAM)
@@ -97,6 +119,17 @@ def _kernel32():
     _declare(d, "QueryFullProcessImageNameW", W.BOOL, W.HANDLE, W.DWORD, W.LPWSTR, ctypes.POINTER(W.DWORD))
     _declare(d, "GetExitCodeProcess", W.BOOL, W.HANDLE, ctypes.POINTER(W.DWORD))
     _declare(d, "CloseHandle", W.BOOL, W.HANDLE)
+    _declare(d, "CreateJobObjectW", W.HANDLE, ctypes.c_void_p, W.LPCWSTR)
+    _declare(d, "SetInformationJobObject", W.BOOL, W.HANDLE, ctypes.c_int, ctypes.c_void_p, W.DWORD)
+    _declare(d, "AssignProcessToJobObject", W.BOOL, W.HANDLE, W.HANDLE)
+    _declare(d, "QueryInformationJobObject", W.BOOL, W.HANDLE, ctypes.c_int, ctypes.c_void_p,
+             W.DWORD, ctypes.POINTER(W.DWORD))
+    _declare(d, "TerminateJobObject", W.BOOL, W.HANDLE, W.UINT)
+    _declare(d, "CreateToolhelp32Snapshot", W.HANDLE, W.DWORD, W.DWORD)
+    _declare(d, "Thread32First", W.BOOL, W.HANDLE, ctypes.c_void_p)
+    _declare(d, "Thread32Next", W.BOOL, W.HANDLE, ctypes.c_void_p)
+    _declare(d, "OpenThread", W.HANDLE, W.DWORD, W.BOOL, W.DWORD)
+    _declare(d, "ResumeThread", W.DWORD, W.HANDLE)
     return d
 
 
@@ -199,7 +232,9 @@ def ddc_displays():
         arr = (PHYSICAL_MONITOR * n.value)()
         if not dxva2.GetPhysicalMonitorsFromHMONITOR(hmon, n.value, arr):
             continue
-        handle = arr[0].hPhysicalMonitor
+        # Handles are small integers and 0 is a valid one; ctypes hands back
+        # None for it, which would later read as "no such monitor".
+        handle = arr[0].hPhysicalMonitor or 0
         for extra in arr[1:]:
             dxva2.DestroyPhysicalMonitor(extra.hPhysicalMonitor)
         bus = len(_handles)
@@ -223,6 +258,8 @@ def _read_vcp(handle):
 
 
 def _handle(bus):
+    """Handle for `bus`, or None when no such monitor. Never confuse the two:
+    handle 0 is a real monitor."""
     if bus not in _handles:
         ddc_displays()
     return _handles.get(bus)
@@ -231,12 +268,12 @@ def _handle(bus):
 def get_brightness(bus):
     """Return (current, max) brightness, or None."""
     h = _handle(bus)
-    return _read_vcp(h) if h else None
+    return _read_vcp(h) if h is not None else None
 
 
 def set_brightness(bus, value):
     h = _handle(bus)
-    return bool(h) and bool(_dxva2().SetVCPFeature(h, 0x10, int(value)))
+    return h is not None and bool(_dxva2().SetVCPFeature(h, 0x10, int(value)))
 
 
 # ── Processes ─────────────────────────────────────────────────────────────────
@@ -448,6 +485,196 @@ def set_autostart(enabled):
     except OSError as e:
         return str(e)
     return None
+
+
+# ── Overlay children ──────────────────────────────────────────────────────────
+#
+# Each overlay runs inside its own job object. Two Windows facts make that
+# worth the trouble:
+#
+#   * a virtualenv's python.exe is a stub that re-executes the real
+#     interpreter, so the pid Popen reports is not the pid that owns the
+#     overlay window. The daemon needs the real one to recognise its own
+#     windows and not mistake them for a fullscreen game;
+#   * nothing cleans up children when the daemon is killed, which would leave
+#     a black window covering a screen with no obvious way to close it.
+#
+# A job object answers both: it lists every pid inside it, and it kills them
+# when its last handle closes, which happens when the daemon dies.
+
+JobObjectBasicProcessIdList        = 3
+JobObjectExtendedLimitInformation  = 9
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+TH32CS_SNAPTHREAD                  = 0x0004
+THREAD_SUSPEND_RESUME              = 0x0002
+MAX_JOB_PIDS                       = 64
+CREATE_SUSPENDED                   = 0x0004   # subprocess does not define it
+
+
+class IO_COUNTERS(ctypes.Structure):
+    _fields_ = [(n, ctypes.c_ulonglong) for n in
+                ("ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                 "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+
+class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
+                ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD)]
+
+
+class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+
+class JOBOBJECT_BASIC_PROCESS_ID_LIST(ctypes.Structure):
+    _fields_ = [("NumberOfAssignedProcesses", wintypes.DWORD),
+                ("NumberOfProcessIdsInList", wintypes.DWORD),
+                ("ProcessIdList", ctypes.c_size_t * MAX_JOB_PIDS)]
+
+
+class THREADENTRY32(ctypes.Structure):
+    _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                ("th32ThreadID", wintypes.DWORD), ("th32OwnerProcessID", wintypes.DWORD),
+                ("tpBasePri", ctypes.c_long), ("tpDeltaPri", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD)]
+
+
+def _kill_on_close_job():
+    """A job that kills whatever is inside it once we let go of it."""
+    k32 = _kernel32()
+    job = k32.CreateJobObjectW(None, None)
+    if not job:
+        return None
+    info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not k32.SetInformationJobObject(job, JobObjectExtendedLimitInformation,
+                                       ctypes.byref(info), ctypes.sizeof(info)):
+        k32.CloseHandle(job)
+        return None
+    return job
+
+
+def _resume_process(pid):
+    """Resume a process started suspended (we never get its thread handle)."""
+    k32 = _kernel32()
+    snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+    if snap == wintypes.HANDLE(-1).value or not snap:
+        return False
+    try:
+        entry = THREADENTRY32()
+        entry.dwSize = ctypes.sizeof(entry)
+        ok = k32.Thread32First(snap, ctypes.byref(entry))
+        resumed = False
+        while ok:
+            if entry.th32OwnerProcessID == pid:
+                th = k32.OpenThread(THREAD_SUSPEND_RESUME, False, entry.th32ThreadID)
+                if th:
+                    k32.ResumeThread(th)
+                    k32.CloseHandle(th)
+                    resumed = True
+            ok = k32.Thread32Next(snap, ctypes.byref(entry))
+        return resumed
+    finally:
+        k32.CloseHandle(snap)
+
+
+class OverlayProcess:
+    """One overlay window, held in a job object (see the note above)."""
+
+    def __init__(self, cmd):
+        k32 = _kernel32()
+        self._job = _kill_on_close_job()
+        # Start suspended so the stub cannot spawn the real interpreter before
+        # the job is in place; without that the grandchild could escape it.
+        flags = CREATE_SUSPENDED if self._job else 0
+        self._p = subprocess.Popen(cmd, creationflags=flags)
+        if self._job:
+            if not k32.AssignProcessToJobObject(self._job, int(self._p._handle)):
+                k32.CloseHandle(self._job)
+                self._job = None
+            if not _resume_process(self._p.pid):
+                # Nothing would ever run: fall back to a plain child process.
+                self._p.kill()
+                if self._job:
+                    k32.CloseHandle(self._job)
+                self._job = None
+                self._p = subprocess.Popen(cmd)
+
+    @property
+    def pids(self):
+        """Every pid this overlay occupies — the stub and the real window."""
+        if not self._job:
+            return {self._p.pid}
+        info = JOBOBJECT_BASIC_PROCESS_ID_LIST()
+        got = wintypes.DWORD()
+        if not _kernel32().QueryInformationJobObject(
+                self._job, JobObjectBasicProcessIdList,
+                ctypes.byref(info), ctypes.sizeof(info), ctypes.byref(got)):
+            return {self._p.pid}
+        n = min(info.NumberOfProcessIdsInList, MAX_JOB_PIDS)
+        return {info.ProcessIdList[i] for i in range(n)} | {self._p.pid}
+
+    def poll(self):
+        return self._p.poll()
+
+    def stop(self, timeout=2):
+        """Terminate the whole job, so no part of the overlay survives."""
+        k32 = _kernel32()
+        if self._job:
+            k32.TerminateJobObject(self._job, 0)
+        elif self._p.poll() is None:
+            self._p.terminate()
+        try:
+            self._p.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self._p.kill()
+        if self._job:
+            k32.CloseHandle(self._job)
+            self._job = None
+
+
+def spawn_overlay(cmd):
+    return OverlayProcess(cmd)
+
+
+# ── Console ───────────────────────────────────────────────────────────────────
+
+def prepare_console():
+    """Make this console able to show the settings wizard.
+
+    The wizard draws its frame with box-drawing characters and colours it with
+    ANSI escapes. A Windows console (or a redirected stream) defaults to the
+    legacy code page, where those characters do not exist and printing them
+    raises UnicodeEncodeError before the first screen is drawn. Switch the
+    streams to UTF-8 and ask the console to interpret escapes.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
+    ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        for handle_id in (-11, -12):                  # stdout, stderr
+            h = k32.GetStdHandle(handle_id)
+            mode = wintypes.DWORD()
+            if h and k32.GetConsoleMode(h, ctypes.byref(mode)):
+                k32.SetConsoleMode(h, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+    except (AttributeError, OSError):
+        pass
 
 
 # ── Terminal ──────────────────────────────────────────────────────────────────

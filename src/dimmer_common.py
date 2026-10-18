@@ -67,7 +67,10 @@ def load_config():
     cfg = {k: list(v) if isinstance(v, list) else v for k, v in DEFAULTS.items()}
     screens, legacy = {}, {}
     try:
-        text = CONFIG_FILE.read_text()
+        # Always UTF-8: the locale encoding differs between systems (and
+        # cannot even represent "z with a dot" on a Western Windows), so a
+        # config would not survive moving between machines.
+        text = CONFIG_FILE.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         text = ""
     for line in text.splitlines():
@@ -151,7 +154,7 @@ def save_config(cfg):
             if s.get(k) is not None:
                 lines.append(f"screen{i}_{k}={s[k]}")
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text("\n".join(lines) + "\n")
+    CONFIG_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def save_changes(cfg, keys, screens):
@@ -310,7 +313,7 @@ def dimmed_value(current, dim_level):
 
 def load_state():
     try:
-        state = json.loads(STATE_FILE.read_text())
+        state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
     if isinstance(state, dict):                  # 1.1: single screen
@@ -326,4 +329,4 @@ def save_state(state):
             pass
         return
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state))
+    STATE_FILE.write_text(json.dumps(state), encoding="utf-8")

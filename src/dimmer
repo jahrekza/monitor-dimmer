@@ -331,6 +331,7 @@ def print_menu(st):
 
 
 def main():
+    backend.prepare_console()
     st = Settings()
     while True:
         print_menu(st)
