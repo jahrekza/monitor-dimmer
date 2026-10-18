@@ -409,7 +409,8 @@ def main():
         uninstaller = Path(__file__).resolve().parent / "uninstall.py"
         if not uninstaller.exists():
             sys.exit(f"{uninstaller} not found — run uninstall.py from the download folder")
-        os.execv(sys.executable, [sys.executable, str(uninstaller)])
+        python = backend.uninstaller_python()
+        os.execv(python, [python, str(uninstaller)])
 
     backend.register_daemon()
     restore_leftover_dim()

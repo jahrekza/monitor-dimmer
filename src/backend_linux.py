@@ -7,8 +7,10 @@ import json
 import os
 import re
 import shutil
+import sys
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 NAME = "linux"
@@ -452,3 +454,313 @@ def open_in_terminal(cmd):
             subprocess.Popen([term, *flag, *cmd], start_new_session=True)
             return True
     return False
+
+
+# ── Installation ──────────────────────────────────────────────────────────────
+#
+# An install is: a folder with the programs and a private virtualenv, shell
+# launchers in ~/.local/bin, a .desktop entry, and a systemd user service.
+
+HOME        = Path.home()
+APP_HOME    = HOME / ".local/share/monitor-dimmer"
+VENV_DIR    = APP_HOME / "venv"
+VENV_PY     = VENV_DIR / "bin/python"
+BIN_DIR     = HOME / ".local/bin"
+SERVICE_DIR = HOME / ".config/systemd/user"
+SERVICE     = SERVICE_DIR / "monitor-dimmer.service"
+APP_DIR     = HOME / ".local/share/applications"
+DESKTOP     = APP_DIR / "dimmer.desktop"
+ICONS_DIR   = HOME / ".local/share/icons"
+ICON_DEST   = ICONS_DIR / "monitor-dimmer.png"
+SVG_DEST    = ICONS_DIR / "hicolor/scalable/apps/monitor-dimmer-symbolic.svg"
+KDE_STATS   = HOME / ".config/kactivitymanagerd-statsrc"
+
+# PyGObject and PyQt6 are best taken from the distro, so the environment can
+# see the system packages.
+VENV_OPTIONS = ["--system-site-packages"]
+# (package, import name, offer the distro package first)
+PIP_PACKAGES = [("pystray", "pystray", False), ("Pillow", "PIL", False),
+                ("PyQt6", "PyQt6", True)]
+
+INSTALL_CMD = {
+    "arch":   "sudo pacman -S {pkg}",
+    "debian": "sudo apt install {pkg}",
+    "fedora": "sudo dnf install {pkg}",
+    "suse":   "sudo zypper install {pkg}",
+}
+
+SYSTEM_PKGS = {
+    "arch":   {"ddcutil": "ddcutil", "xdotool": "xdotool", "xprop": "xorg-xprop",
+               "gdbus": "glib2", "venv": "python", "PyQt6": "python-pyqt6",
+               "appindicator": "libappindicator-gtk3"},
+    "debian": {"ddcutil": "ddcutil", "xdotool": "xdotool", "xprop": "x11-utils",
+               "gdbus": "libglib2.0-bin", "venv": "python3-venv", "PyQt6": "python3-pyqt6",
+               "appindicator": "gir1.2-ayatanaappindicator3-0.1"},
+    "fedora": {"ddcutil": "ddcutil", "xdotool": "xdotool", "xprop": "xprop",
+               "gdbus": "glib2", "venv": "python3", "PyQt6": "python3-pyqt6",
+               "appindicator": "libappindicator-gtk3"},
+    "suse":   {"ddcutil": "ddcutil", "xdotool": "xdotool", "xprop": "xprop",
+               "gdbus": "glib2-tools", "venv": "python3", "PyQt6": "python3-PyQt6",
+               "appindicator": "typelib-1_0-AppIndicator3-0_1"},
+}
+
+# Wording the installer shows, where it depends on the system
+GAME_PATHS_NOTE = "listed here (or a Windows .exe from it, via Wine) counts as a game."
+FULLSCREEN_NOTE = ("Only when fullscreen: KDE sees all windows; "
+                   "elsewhere only X11/XWayland games")
+
+_indicator = False          # set by post_venv_check, used by install_startup
+
+
+def _distro():
+    fields = {}
+    try:
+        for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+            k, _, v = line.partition("=")
+            fields[k] = v.strip().strip('"').lower()
+    except OSError:
+        return "unknown"
+    ids = [fields.get("ID", "")] + fields.get("ID_LIKE", "").split()
+    families = {"arch": "arch", "debian": "debian", "ubuntu": "debian",
+                "fedora": "fedora", "rhel": "fedora", "suse": "suse"}
+    for i in ids:
+        for key, family in families.items():
+            if key in i:
+                return family
+    return "unknown"
+
+
+def install_hint(keys):
+    distro = _distro()
+    pkgs = [SYSTEM_PKGS.get(distro, {}).get(k, k) for k in keys]
+    return INSTALL_CMD.get(distro, "install: {pkg}").format(pkg=" ".join(pkgs))
+
+
+def check_tools():
+    """[(key, purpose, found)] for optional tools, plus a fatal error or None."""
+    optional = [
+        ("ddcutil", "hardware brightness mode (DDC/CI)"),
+        ("gdbus",   "VLC fullscreen detection"),
+        ("xdotool", 'the "dim only while fullscreen" option'),
+        ("xprop",   'the "dim only while fullscreen" option'),
+    ]
+    found = [(key, purpose, bool(shutil.which(key))) for key, purpose in optional]
+    fatal = None
+    if not shutil.which("systemctl"):
+        fatal = "systemctl not found — the daemon runs as a systemd user service"
+    return found, fatal
+
+
+def post_venv_check(venv_py):
+    """[(label, ok, hint)] for what pip cannot provide."""
+    global _indicator
+    _indicator = any(
+        subprocess.run([str(venv_py), "-c",
+                        "import gi; gi.require_version(%r, '0.1')" % lib],
+                       capture_output=True).returncode == 0
+        for lib in ("AppIndicator3", "AyatanaAppIndicator3"))
+    hint = None if _indicator else install_hint(["appindicator"])
+    return [("AppIndicator (tray icon)", _indicator, hint)]
+
+
+def install_icons(assets_dir):
+    """Returns (icon for the menu entry, messages)."""
+    msgs, icon = [], None
+    ICONS_DIR.mkdir(parents=True, exist_ok=True)
+    png = assets_dir / "dimmer.png"
+    if png.exists():
+        shutil.copy2(png, ICON_DEST)
+        icon = ICON_DEST
+        msgs.append("App icon installed to %s" % ICON_DEST)
+    svg = assets_dir / "monitor-dimmer-symbolic.svg"
+    if svg.exists():
+        SVG_DEST.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(svg, SVG_DEST)
+        msgs.append("Symbolic tray icon installed to %s" % SVG_DEST)
+    return icon, msgs
+
+
+LAUNCHER = '#!/bin/sh\nexec "%s" "%s" "$@"\n'
+
+
+def write_launchers(programs):
+    """Shell launchers that run each program with the private virtualenv."""
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    written = []
+    for name in programs:
+        (APP_HOME / name).chmod(0o755)
+        launcher = BIN_DIR / name
+        launcher.unlink(missing_ok=True)
+        launcher.write_text(LAUNCHER % (VENV_PY, APP_HOME / name), encoding="utf-8")
+        launcher.chmod(0o755)
+        written.append(launcher)
+    return written
+
+
+def path_warning():
+    if str(BIN_DIR) not in os.environ.get("PATH", "").split(":"):
+        return "%s is not in your PATH — run the wizard as %s" % (BIN_DIR, BIN_DIR / "dimmer")
+    return None
+
+
+SERVICE_UNIT = """[Unit]
+Description=Monitor Dimmer — auto-dim secondary screen during games/media
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%(bin)s/monitor-dimmer
+# Put the brightness back if the daemon died while a monitor was dimmed
+ExecStopPost=%(bin)s/monitor-dimmer --restore
+Restart=on-failure
+RestartSec=5
+%(env)s
+[Install]
+WantedBy=graphical-session.target
+"""
+
+
+def install_startup(autostart):
+    SERVICE_DIR.mkdir(parents=True, exist_ok=True)
+    env = "Environment=PYSTRAY_BACKEND=appindicator\n" if _indicator else ""
+    SERVICE.write_text(SERVICE_UNIT % {"bin": BIN_DIR, "env": env}, encoding="utf-8")
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    action = "enable" if autostart else "disable"
+    subprocess.run(["systemctl", "--user", action, "monitor-dimmer.service"],
+                   capture_output=True)
+    if autostart:
+        return "Service enabled (starts automatically at login): %s" % SERVICE
+    return "Autostart disabled — start manually with: systemctl --user start monitor-dimmer"
+
+
+DESKTOP_ENTRY = """[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Monitor Dimmer
+Comment=Configure auto-dimming of secondary screen during games or fullscreen media
+Exec=%(bin)s/dimmer
+Icon=%(icon)s
+Terminal=true
+Categories=Settings;HardwareSettings;
+Keywords=monitor;brightness;dim;gaming;
+"""
+
+
+def install_menu_entry(icon=None):
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    DESKTOP.write_text(DESKTOP_ENTRY % {"bin": BIN_DIR, "icon": icon or "video-display"},
+                       encoding="utf-8")
+    for tool in ("kbuildsycoca6", "kbuildsycoca5", "update-desktop-database"):
+        if shutil.which(tool):
+            cmd = [tool] if tool.startswith("kbuild") else [tool, str(APP_DIR)]
+            subprocess.run(cmd, capture_output=True)
+    return DESKTOP
+
+
+def favorites_prompt():
+    """The question to ask about pinning, or None when it makes no sense here."""
+    if "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", ""):
+        return "Add to KDE application launcher favorites?"
+    return None
+
+
+def add_to_favorites():
+    if not KDE_STATS.exists():
+        return None
+    content = KDE_STATS.read_text(encoding="utf-8")
+    entry = "applications:dimmer.desktop"
+    if entry in content:
+        return "Already in KDE favorites"
+    KDE_STATS.write_text(
+        re.sub(r"(ordering=[^\n]+)", lambda m: m.group(0) + "," + entry, content),
+        encoding="utf-8")
+    return "Added to KDE application launcher favorites"
+
+
+def start_daemon():
+    subprocess.run(["systemctl", "--user", "restart", "monitor-dimmer.service"],
+                   capture_output=True)
+    time.sleep(2)
+    return service_status() == "active"
+
+
+# ── Where games live ──────────────────────────────────────────────────────────
+
+STEAM_ROOTS = [
+    HOME / ".steam/steam",
+    HOME / ".local/share/Steam",
+    HOME / ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+]
+
+HEROIC_CONFIGS = [
+    HOME / ".config/heroic/config.json",
+    HOME / ".var/app/com.heroicgameslauncher.hgl/config/heroic/config.json",
+]
+
+
+def steam_libraries():
+    libs = []
+    for root in STEAM_ROOTS:
+        vdf = root / "steamapps/libraryfolders.vdf"
+        dirs = [root]
+        if vdf.exists():
+            dirs += [Path(p) for p in
+                     re.findall(r'"path"\s+"([^"]+)"', vdf.read_text(errors="ignore"))]
+        for d in dirs:
+            common = d / "steamapps/common"
+            if common.is_dir() and common not in libs:
+                libs.append(common)
+    return libs
+
+
+def other_game_paths():
+    found = []
+    for cfg in HEROIC_CONFIGS:
+        try:
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+            p = data.get("defaultSettings", {}).get("defaultInstallPath")
+            if p:
+                found.append(("Heroic (GOG/Epic)", str(Path(p).expanduser())))
+        except (OSError, ValueError):
+            pass
+    found.append(("Heroic (GOG/Epic)", str(HOME / "Games/Heroic")))
+    return found
+
+
+# ── Uninstall ─────────────────────────────────────────────────────────────────
+
+def uninstaller_python():
+    """Interpreter to run the uninstaller with. The virtualenv lives inside
+    the folder being deleted, but on Linux a running program does not stop
+    its file from being removed."""
+    return sys.executable
+
+
+def stop_for_uninstall():
+    # Stopping runs ExecStopPost, which restores a dimmed monitor's brightness
+    for action in ("stop", "disable"):
+        subprocess.run(["systemctl", "--user", action, "monitor-dimmer.service"],
+                       capture_output=True)
+
+
+def uninstall_items():
+    """(files, dirs) to remove, in that order."""
+    files = [BIN_DIR / name for name in
+             ("monitor-dimmer", "monitor-dimmer-overlay", "dimmer")]
+    files += [SERVICE, DESKTOP, ICON_DEST, SVG_DEST, CONFIG_FILE]
+    return files, [APP_HOME, STATE_DIR]
+
+
+def uninstall_cleanup():
+    """Whatever is left once the files are gone."""
+    notes = []
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    if KDE_STATS.exists():
+        content = KDE_STATS.read_text(encoding="utf-8")
+        if "dimmer.desktop" in content:
+            content = content.replace(",applications:dimmer.desktop", "")
+            content = content.replace("applications:dimmer.desktop,", "")
+            KDE_STATS.write_text(content, encoding="utf-8")
+            notes.append("Removed from KDE favorites")
+    return notes

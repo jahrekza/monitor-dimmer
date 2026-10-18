@@ -686,3 +686,267 @@ def open_in_terminal(cmd):
     else:
         subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
     return True
+
+
+# ── Installation ──────────────────────────────────────────────────────────────
+#
+# Windows has no systemd and no ~/.local/bin, so an install is: a folder with
+# the programs and a private virtualenv, .cmd launchers beside them, a Start
+# menu shortcut, and the Run registry key for starting at login.
+
+APP_HOME  = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "Programs" / "monitor-dimmer"
+VENV_DIR  = APP_HOME / "venv"
+VENV_PY   = VENV_DIR / "Scripts" / "python.exe"
+VENV_PYW  = VENV_DIR / "Scripts" / "pythonw.exe"
+BIN_DIR   = APP_HOME / "bin"
+ICON_DEST = APP_HOME / "monitor-dimmer.ico"
+START_MENU = (Path(os.environ.get("APPDATA", Path.home() / "AppData/Roaming"))
+              / "Microsoft/Windows/Start Menu/Programs/Monitor Dimmer.lnk")
+
+# A system virtualenv would hand us the system's packages; on Windows there is
+# no distro PyQt6 to borrow, so the environment is self-contained.
+VENV_OPTIONS = []
+
+# Wording the installer shows, where it depends on the system
+GAME_PATHS_NOTE = "listed here counts as a game."
+FULLSCREEN_NOTE = ("Only when fullscreen: the dimmer sees every window on "
+                   "Windows, so this is safe to turn on")
+# (package, import name, offer a system package first). Windows has no
+# distro packages to borrow, so everything comes from pip.
+PIP_PACKAGES = [("pystray", "pystray", False), ("Pillow", "PIL", False),
+                ("PyQt6", "PyQt6", False)]
+
+
+def check_tools():
+    """[(name, purpose, found)] for optional tools, plus a fatal error or None.
+
+    Everything the Windows backend needs is in the OS itself: DDC/CI through
+    dxva2, windows through user32, no helper programs at all.
+    """
+    return [], None
+
+
+def install_hint(keys):
+    return None
+
+
+def _daemon_target():
+    """(interpreter, script) of the installed daemon, windowless."""
+    py = VENV_PYW if VENV_PYW.exists() else VENV_PY
+    return str(py), str(APP_HOME / "monitor-dimmer")
+
+
+def write_launchers(programs):
+    """A .cmd per program, so they can be run from a terminal if wanted."""
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    written = []
+    for name in programs:
+        launcher = BIN_DIR / f"{name}.cmd"
+        # %* forwards the arguments; @echo off keeps the console clean.
+        # Text mode already turns a newline into CRLF: writing CRLF here
+        # would put a stray carriage return on every line.
+        launcher.write_text(
+            "@echo off\n"
+            f'"{VENV_PY}" "{APP_HOME / name}" %*\n',
+            encoding="utf-8")
+        written.append(launcher)
+    return written
+
+
+def install_icons(assets_dir):
+    """Returns (icon for the shortcut, messages).
+
+    Shortcuts want an .ico and the repo ships a .png, so convert it. Pillow
+    lands in the virtualenv during setup, so this runs after it.
+    """
+    png = assets_dir / "dimmer.png"
+    if not png.exists():
+        return None, []
+    for python in (VENV_PY, Path(sys.executable)):
+        if not Path(python).exists():
+            continue
+        code = ("from PIL import Image; "
+                "Image.open(%r).convert('RGBA').save(%r, "
+                "sizes=[(16,16),(32,32),(48,48),(64,64),(256,256)])"
+                % (str(png), str(ICON_DEST)))
+        r = subprocess.run([str(python), "-c", code], capture_output=True)
+        if r.returncode == 0 and ICON_DEST.exists():
+            return ICON_DEST, ["App icon installed to %s" % ICON_DEST]
+    return None, ["Could not build the shortcut icon — using the default one"]
+
+
+def post_venv_check(venv_py):
+    """[(label, ok, hint)] for what pip cannot provide. Windows needs nothing
+    beyond the packages themselves: the tray host is part of the shell."""
+    return []
+
+
+def path_warning():
+    return ("%s is not on your PATH — run the wizard from the Start menu, "
+            "or as %s" % (BIN_DIR, BIN_DIR / "dimmer.cmd"))
+
+
+def favorites_prompt():
+    """Nothing to pin to: the Start menu shortcut is the whole story here."""
+    return None
+
+
+def add_to_favorites():
+    return None
+
+
+def uninstaller_python():
+    """Interpreter to run the uninstaller with.
+
+    Windows refuses to delete a running executable, and the virtualenv's
+    python.exe sits inside the very folder we are about to remove. A
+    virtualenv remembers the interpreter it was built from, which is
+    somewhere else, so use that one.
+    """
+    return getattr(sys, "_base_executable", None) or sys.executable
+
+
+def stop_for_uninstall():
+    if _daemon_pid() == os.getpid():
+        # `monitor-dimmer --uninstall` replaced the daemon with the
+        # uninstaller, so we are the "daemon": asking it to stop would wait
+        # ten seconds and then kill the uninstall halfway through.
+        unregister_daemon()
+        return
+    service_action("stop")
+
+
+def install_menu_entry(icon=None):
+    """Start menu shortcut for the settings wizard, through WScript.Shell."""
+    START_MENU.parent.mkdir(parents=True, exist_ok=True)
+    target, _ = str(VENV_PY), None
+    ps = (
+        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut({lnk});"
+        "$s.TargetPath = {target};"
+        "$s.Arguments = {args};"
+        "$s.WorkingDirectory = {cwd};"
+        "$s.Description = 'Monitor Dimmer settings';"
+        + ("$s.IconLocation = {icon};" if icon else "")
+        + "$s.Save()"
+    ).format(
+        lnk=_ps_quote(str(START_MENU)),
+        target=_ps_quote(target),
+        args=_ps_quote(f'"{APP_HOME / "dimmer"}"'),
+        cwd=_ps_quote(str(APP_HOME)),
+        icon=_ps_quote(str(icon)) if icon else "",
+    )
+    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                       capture_output=True, text=True)
+    return START_MENU if r.returncode == 0 and START_MENU.exists() else None
+
+
+def _ps_quote(text):
+    """A PowerShell single-quoted string."""
+    return "'" + text.replace("'", "''") + "'"
+
+
+def install_startup(autostart):
+    """Start at login, pointing at the installed copy (not this installer)."""
+    import winreg
+    py, script = _daemon_target()
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            if autostart:
+                winreg.SetValueEx(k, RUN_VALUE, 0, winreg.REG_SZ, f'"{py}" "{script}"')
+                return f"Starts at login (registry Run key, {RUN_VALUE})"
+            try:
+                winreg.DeleteValue(k, RUN_VALUE)
+            except FileNotFoundError:
+                pass
+            return "Autostart disabled — start it from the Start menu or the launcher"
+    except OSError as e:
+        return f"Could not write the Run key: {e}"
+
+
+def start_daemon():
+    """Restart the installed daemon. Returns True once it reports itself."""
+    service_action("stop")
+    py, script = _daemon_target()
+    flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    subprocess.Popen([py, script], creationflags=flags, close_fds=True)
+    for _ in range(20):
+        if _daemon_pid():
+            return True
+        time.sleep(0.5)
+    return False
+
+
+# ── Where games live ──────────────────────────────────────────────────────────
+
+def steam_libraries():
+    """Every steamapps/common Steam knows about, found through the registry."""
+    import winreg
+    roots = []
+    for hive, key, value in ((winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
+                             (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam",
+                              "InstallPath")):
+        try:
+            with winreg.OpenKey(hive, key) as k:
+                roots.append(Path(winreg.QueryValueEx(k, value)[0]))
+        except OSError:
+            pass
+    libs = []
+    for root in roots:
+        dirs = [root]
+        vdf = root / "steamapps/libraryfolders.vdf"
+        if vdf.exists():
+            import re
+            dirs += [Path(p.replace("\\\\", "\\"))
+                     for p in re.findall(r'"path"\s+"([^"]+)"', vdf.read_text(errors="ignore"))]
+        for d in dirs:
+            common = d / "steamapps/common"
+            if common.is_dir() and common not in libs:
+                libs.append(common)
+    return libs
+
+
+def other_game_paths():
+    """[(label, path)] for launchers other than Steam."""
+    appdata = Path(os.environ.get("APPDATA", Path.home() / "AppData/Roaming"))
+    found = []
+    cfg = appdata / "heroic" / "config.json"
+    try:
+        import json
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        p = data.get("defaultSettings", {}).get("defaultInstallPath")
+        if p:
+            found.append(("Heroic (GOG/Epic)", str(Path(p))))
+    except (OSError, ValueError):
+        pass
+    for label, p in (("Epic Games", Path(os.environ.get("ProgramW6432", r"C:\Program Files"))
+                                    / "Epic Games"),
+                     ("GOG Galaxy", Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+                                    / "GOG Galaxy" / "Games"),
+                     ("Xbox / Game Pass", Path(os.environ.get("SystemDrive", "C:") + "\\") / "XboxGames")):
+        if p.is_dir():
+            found.append((label, str(p)))
+    return found
+
+
+# ── Uninstall ─────────────────────────────────────────────────────────────────
+
+def uninstall_items():
+    """(files, dirs) to remove, in that order.
+
+    CONFIG_FILE's folder is ours alone here, unlike ~/.config on Linux, so it
+    goes too and leaves nothing behind.
+    """
+    return ([START_MENU, CONFIG_FILE], [APP_HOME, STATE_DIR, CONFIG_FILE.parent])
+
+
+def uninstall_cleanup():
+    """Whatever is left once the files are gone."""
+    import winreg
+    notes = []
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            winreg.DeleteValue(k, RUN_VALUE)
+            notes.append("Removed the start-at-login registry entry")
+    except OSError:
+        pass
+    return notes

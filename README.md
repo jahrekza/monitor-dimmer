@@ -3,8 +3,8 @@
 Automatically dims your other monitors when you launch a game or play fullscreen media — and restores them when you're done.
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Platform](https://img.shields.io/badge/platform-Linux-lightgrey)
-![Desktop](https://img.shields.io/badge/desktop-KDE%20Plasma-blue)
+![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey)
+![Desktop](https://img.shields.io/badge/desktop-KDE%20Plasma%20%7C%20Windows%2010%2F11-blue)
 
 ---
 
@@ -28,8 +28,10 @@ Automatically dims your other monitors when you launch a game or play fullscreen
 
 ## Requirements
 
-- Linux with a systemd user session — developed on **KDE Plasma** (Wayland or X11)
-- Python 3.10+ with `venv` support
+Python 3.10+ with `venv` support, on either system.
+
+**Linux** — a systemd user session, developed on **KDE Plasma** (Wayland or X11)
+
 - `PyQt6` — overlay window and monitor list (best from your distro; the installer can pip-install it otherwise)
 - Optional:
   - `ddcutil` — hardware brightness mode (monitors must support DDC/CI)
@@ -37,9 +39,11 @@ Automatically dims your other monitors when you launch a game or play fullscreen
   - `xdotool` + `xprop` — fullscreen windows on desktops other than KDE (browser video, "dim only while fullscreen")
   - AppIndicator (`libappindicator-gtk3` / `gir1.2-ayatanaappindicator3-0.1`) — tray icon
 
-`pystray` and `Pillow` are installed by the installer into a private virtual environment (`~/.local/share/monitor-dimmer/venv`), so nothing is pip-installed into your system Python.
+**Windows 10 / 11** — nothing else to install. DDC/CI, the window list and the tray come from the operating system, and the installer pip-installs `PyQt6`, `pystray` and `Pillow` into a private virtual environment.
 
-### Install dependencies
+On Linux `pystray` and `Pillow` go into that same kind of private environment (`~/.local/share/monitor-dimmer/venv`), so nothing is pip-installed into your system Python.
+
+### Install dependencies (Linux only)
 
 **Arch / CachyOS / Manjaro**
 ```bash
@@ -67,6 +71,8 @@ sudo usermod -aG i2c $USER   # then log out and back in
 
 Run it in a terminal from your desktop session (the installer asks the compositor for the list of screens). Both ways below download into a new `monitor-dimmer` folder inside the current directory — it doesn't need to exist beforehand.
 
+### Linux
+
 **With git**
 
 ```bash
@@ -84,13 +90,26 @@ cd monitor-dimmer
 python3 install.py
 ```
 
-The installer will:
+### Windows
+
+In PowerShell or Windows Terminal:
+
+```powershell
+git clone https://github.com/jahrekza/monitor-dimmer
+cd monitor-dimmer
+python install.py
+```
+
+Without git, download the repository as a ZIP, unpack it, and run `python install.py` in the unpacked folder. Nothing needs administrator rights — everything is installed for your user only.
+
+### What the installer does
+
 1. Check optional system tools and create the private Python environment
 2. Let you pick the screens to dim and how (overlay or hardware brightness, per screen)
 3. Ask what to detect: games (with Steam libraries and Heroic folders found automatically), VLC, video sites
 4. Ask for the poll interval and whether to start at login
-5. Install the programs, create a systemd user service, and add a desktop entry
-6. Optionally add to KDE application launcher favorites
+5. Install the programs, and set it to start at login (a systemd user service on Linux, the Run registry key on Windows)
+6. Add a menu entry — a desktop entry on Linux, a Start menu shortcut on Windows — and optionally pin it to KDE favorites
 7. Run a quick dim test so you can see the effect immediately
 
 Everything is installed to your home directory (see [File locations](#file-locations)), so the download folder can be deleted afterwards.
@@ -224,13 +243,28 @@ Placing a window on a chosen screen is up to the compositor: KDE Plasma and X11 
 | `src/dimmer` | Settings wizard |
 | `src/dimmer_common.py` | OS-independent logic: config, screen matching, video sites, levels, saved brightness |
 | `src/backend_linux.py` | Everything Linux-specific: ddcutil, `/proc` + Steam, VLC over MPRIS, KWin script / xprop, systemd, terminals |
-| `src/backend_windows.py` | The same interface on Win32 APIs — **work in progress, not tested yet** |
+| `src/backend_windows.py` | The same interface on Win32 APIs: DDC/CI through dxva2, monitor identity from the registry's EDID, Steam's `RunningAppID`, windows and job objects through user32/kernel32 |
 
 The daemon, settings and installer reach the operating system only through the backend, which `dimmer_common.py` picks by platform.
 
 ---
 
 ## File locations
+
+### Windows
+
+| File | Purpose |
+|------|---------|
+| `%LOCALAPPDATA%\Programs\monitor-dimmer\` | Programs, the uninstaller, the icon and their private Python environment |
+| `%LOCALAPPDATA%\Programs\monitor-dimmer\bin\` | `monitor-dimmer.cmd`, `monitor-dimmer-overlay.cmd`, `dimmer.cmd` |
+| `%LOCALAPPDATA%\monitor-dimmer\` | Brightness to restore while a DDC dim is active, and the daemon's pid |
+| `%APPDATA%\monitor-dimmer\monitor-dimmer.conf` | Configuration file |
+| `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Monitor Dimmer.lnk` | Start menu shortcut for the settings wizard |
+| `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` → `MonitorDimmer` | Starts the daemon at login |
+
+That folder is not on your `PATH`, so run the wizard from the Start menu, or as `%LOCALAPPDATA%\Programs\monitor-dimmer\bin\dimmer.cmd`.
+
+### Linux
 
 | File | Purpose |
 |------|---------|

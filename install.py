@@ -9,28 +9,13 @@ import os
 import sys
 import shutil
 import subprocess
-import re
-import time
-import json
 from pathlib import Path
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
-HOME        = Path.home()
-REPO_DIR    = Path(__file__).parent.resolve()
-SRC_DIR     = REPO_DIR / "src"
-BIN_DIR     = HOME / ".local/bin"
-APP_HOME    = HOME / ".local/share/monitor-dimmer"
-VENV_DIR    = APP_HOME / "venv"
-VENV_PY     = VENV_DIR / "bin/python"
-SERVICE_DIR = HOME / ".config/systemd/user"
-APP_DIR     = HOME / ".local/share/applications"
-ICONS_DIR   = HOME / ".local/share/icons"
-ICON_SRC    = REPO_DIR / "assets/dimmer.png"
-ICON_DEST   = ICONS_DIR / "monitor-dimmer.png"
-SVG_SRC     = REPO_DIR / "assets/monitor-dimmer-symbolic.svg"
-SVG_DEST    = ICONS_DIR / "hicolor/scalable/apps/monitor-dimmer-symbolic.svg"
-KDE_STATS   = HOME / ".config/kactivitymanagerd-statsrc"
+REPO_DIR = Path(__file__).parent.resolve()
+SRC_DIR  = REPO_DIR / "src"
+ASSETS   = REPO_DIR / "assets"
 
 PROGRAMS = ["monitor-dimmer", "monitor-dimmer-overlay", "dimmer"]
 MODULES  = ["dimmer_common.py", "backend_linux.py", "backend_windows.py"]
@@ -38,6 +23,13 @@ OBSOLETE = ["fullscreen_watch.py"]          # merged into backend_linux.py in 2.
 
 sys.path.insert(0, str(SRC_DIR))
 import dimmer_common as dc  # noqa: E402
+
+# Where things go, how the daemon is started, where games live: all of that
+# differs between systems and lives in the backend dimmer_common picked.
+backend  = dc.backend
+APP_HOME = backend.APP_HOME
+VENV_DIR = backend.VENV_DIR
+VENV_PY  = backend.VENV_PY
 
 # ── Colors ───────────────────────────────────────────────────────────────────
 
@@ -127,71 +119,25 @@ def run(cmd, **kwargs):
 
 # ── Dependency check ──────────────────────────────────────────────────────────
 
-INSTALL_CMD = {
-    "arch":     "sudo pacman -S {pkg}",
-    "debian":   "sudo apt install {pkg}",
-    "fedora":   "sudo dnf install {pkg}",
-    "suse":     "sudo zypper install {pkg}",
-}
-
-SYSTEM_PKGS = {
-    "arch":   {"ddcutil": "ddcutil", "xdotool": "xdotool", "xprop": "xorg-xprop",
-               "gdbus": "glib2", "venv": "python", "PyQt6": "python-pyqt6",
-               "appindicator": "libappindicator-gtk3"},
-    "debian": {"ddcutil": "ddcutil", "xdotool": "xdotool", "xprop": "x11-utils",
-               "gdbus": "libglib2.0-bin", "venv": "python3-venv", "PyQt6": "python3-pyqt6",
-               "appindicator": "gir1.2-ayatanaappindicator3-0.1"},
-    "fedora": {"ddcutil": "ddcutil", "xdotool": "xdotool", "xprop": "xprop",
-               "gdbus": "glib2", "venv": "python3", "PyQt6": "python3-pyqt6",
-               "appindicator": "libappindicator-gtk3"},
-    "suse":   {"ddcutil": "ddcutil", "xdotool": "xdotool", "xprop": "xprop",
-               "gdbus": "glib2-tools", "venv": "python3", "PyQt6": "python3-PyQt6",
-               "appindicator": "typelib-1_0-AppIndicator3-0_1"},
-}
-
-
-def detect_distro():
-    fields = {}
-    try:
-        for line in Path("/etc/os-release").read_text().splitlines():
-            k, _, v = line.partition("=")
-            fields[k] = v.strip().strip('"').lower()
-    except FileNotFoundError:
-        return "unknown"
-    ids = [fields.get("ID", "")] + fields.get("ID_LIKE", "").split()
-    families = {"arch": "arch", "debian": "debian", "ubuntu": "debian",
-                "fedora": "fedora", "rhel": "fedora", "suse": "suse"}
-    for i in ids:
-        for key, family in families.items():
-            if key in i:
-                return family
-    return "unknown"
-
-
-def install_hint(distro, keys):
-    pkgs = [SYSTEM_PKGS.get(distro, {}).get(k, k) for k in keys]
-    return INSTALL_CMD.get(distro, "install: {pkg}").format(pkg=" ".join(pkgs))
-
-
-def check_system_tools(distro):
+def check_system_tools():
+    """Optional helper programs, as the backend defines them."""
     step("Checking system tools")
-    optional = [
-        ("ddcutil", "ddcutil", "hardware brightness mode (DDC/CI)"),
-        ("gdbus",   "gdbus",   "VLC fullscreen detection"),
-        ("xdotool", "xdotool", "\"dim only while fullscreen\" option"),
-        ("xprop",   "xprop",   "\"dim only while fullscreen\" option"),
-    ]
+    tools, fatal = backend.check_tools()
     missing = []
-    for key, binary, purpose in optional:
-        if shutil.which(binary):
-            ok(binary)
+    for key, purpose, found in tools:
+        if found:
+            ok(key)
         else:
-            warn(f"{binary} — not found {D}(needed for {purpose}){R}")
+            warn(f"{key} — not found {D}(needed for {purpose}){R}")
             missing.append(key)
     if missing:
-        print(f"\n  {D}Optional — install with:{R} {B}{install_hint(distro, missing)}{R}")
-    if not shutil.which("systemctl"):
-        err("systemctl not found — the daemon runs as a systemd user service")
+        hint = backend.install_hint(missing)
+        if hint:
+            print(f"\n  {D}Optional — install with:{R} {B}{hint}{R}")
+    if not tools and not fatal:
+        ok("nothing else needed on this system")
+    if fatal:
+        err(fatal)
         sys.exit(1)
 
 
@@ -199,28 +145,36 @@ def venv_has(module):
     return run([str(VENV_PY), "-c", f"import {module}"]).returncode == 0
 
 
-def setup_venv(distro):
-    """Private virtualenv for pystray/Pillow, so nothing touches the system
-    Python (pip --user is refused on PEP 668 distros). It sees system site
-    packages for PyGObject and PyQt6, which are best installed from the distro."""
+def setup_venv():
+    """Private virtualenv for the Python packages, so nothing touches the
+    system Python (pip --user is refused on PEP 668 distros). Which packages
+    may come from the system instead is the backend's call."""
     step("Setting up Python environment")
     if not VENV_PY.exists():
         APP_HOME.mkdir(parents=True, exist_ok=True)
-        r = run([sys.executable, "-m", "venv", "--system-site-packages", str(VENV_DIR)])
+        r = run([sys.executable, "-m", "venv", *backend.VENV_OPTIONS, str(VENV_DIR)])
         if r.returncode != 0:
             err("Could not create a Python virtual environment")
             print(f"  {D}{r.stderr.strip()}{R}")
-            print(f"  Install venv support: {B}{install_hint(distro, ['venv'])}{R}")
+            hint = backend.install_hint(["venv"])
+            if hint:
+                print(f"  Install venv support: {B}{hint}{R}")
             sys.exit(1)
     ok(f"Virtual environment: {VENV_DIR}")
 
-    pip_pkgs = [pkg for pkg, mod in (("pystray", "pystray"), ("Pillow", "PIL"))
-                if not venv_has(mod)]
-    if not venv_has("PyQt6"):
-        warn("PyQt6 not found (needed for the overlay and monitor list)")
-        print(f"  {D}Best from your distro: {install_hint(distro, ['PyQt6'])}{R}")
-        if ask_yes_no("Install PyQt6 into the environment with pip instead (~80 MB)?"):
-            pip_pkgs.append("PyQt6")
+    pip_pkgs = []
+    for pkg, module, offer_system in backend.PIP_PACKAGES:
+        if venv_has(module):
+            continue
+        if not offer_system:
+            pip_pkgs.append(pkg)
+            continue
+        warn(f"{pkg} not found (needed for the overlay and monitor list)")
+        hint = backend.install_hint([pkg])
+        if hint:
+            print(f"  {D}Best from your system: {hint}{R}")
+        if ask_yes_no(f"Install {pkg} into the environment with pip instead (~80 MB)?"):
+            pip_pkgs.append(pkg)
     if pip_pkgs:
         print(f"  {D}Installing {', '.join(pip_pkgs)}...{R}")
         r = run([str(VENV_PY), "-m", "pip", "install", "--quiet", "--upgrade", *pip_pkgs])
@@ -228,21 +182,20 @@ def setup_venv(distro):
             err("pip install failed")
             print(f"  {D}{r.stderr.strip()[-800:]}{R}")
             sys.exit(1)
-    for name, mod in (("pystray", "pystray"), ("Pillow", "PIL"), ("PyQt6", "PyQt6")):
-        if venv_has(mod):
-            ok(f"python {name}")
+    for pkg, module, _ in backend.PIP_PACKAGES:
+        if venv_has(module):
+            ok(f"python {pkg}")
         else:
-            warn(f"python {name} — missing")
+            warn(f"python {pkg} — missing")
 
-    indicator = any(run([str(VENV_PY), "-c",
-                         f"import gi; gi.require_version('{lib}', '0.1')"]).returncode == 0
-                    for lib in ("AppIndicator3", "AyatanaAppIndicator3"))
-    if indicator:
-        ok("AppIndicator (tray icon)")
-    else:
-        warn("AppIndicator not found — the tray icon may not show; the daemon works without it")
-        print(f"  {D}{install_hint(distro, ['appindicator'])}{R}")
-    return indicator
+    for label, present, hint in backend.post_venv_check(VENV_PY):
+        if present:
+            ok(label)
+        else:
+            warn(f"{label} — not found; the daemon works without it")
+            if hint:
+                print(f"  {D}{hint}{R}")
+
 
 # ── Screens ───────────────────────────────────────────────────────────────────
 
@@ -293,60 +246,27 @@ def pick_screens():
 
 # ── Detection ─────────────────────────────────────────────────────────────────
 
-STEAM_ROOTS = [
-    HOME / ".steam/steam",
-    HOME / ".local/share/Steam",
-    HOME / ".var/app/com.valvesoftware.Steam/.local/share/Steam",
-]
-
-HEROIC_CONFIGS = [
-    HOME / ".config/heroic/config.json",
-    HOME / ".var/app/com.heroicgameslauncher.hgl/config/heroic/config.json",
-]
-
-
-def steam_libraries():
-    libs = []
-    for root in STEAM_ROOTS:
-        vdf = root / "steamapps/libraryfolders.vdf"
-        dirs = [root]
-        if vdf.exists():
-            dirs += [Path(p) for p in re.findall(r'"path"\s+"([^"]+)"', vdf.read_text(errors="ignore"))]
-        for d in dirs:
-            common = d / "steamapps/common"
-            if common.is_dir():
-                libs.append(common)
-    return libs
-
-
 def detect_game_paths():
+    """[(label, folder)] worth offering, from the backend's launchers."""
     found, seen = [], set()
 
     def add(label, path):
-        real = os.path.realpath(path)
+        real = os.path.normcase(os.path.realpath(path))
         if real not in seen and Path(path).is_dir():
             seen.add(real)
             found.append((label, str(path)))
 
-    for lib in steam_libraries():
+    for lib in backend.steam_libraries():
         add("Steam library", lib)
-
-    for cfg in HEROIC_CONFIGS:
-        try:
-            data = json.loads(cfg.read_text())
-            p = data.get("defaultSettings", {}).get("defaultInstallPath")
-            if p:
-                add("Heroic (GOG/Epic)", Path(p).expanduser())
-        except (OSError, ValueError):
-            pass
-    add("Heroic (GOG/Epic)", HOME / "Games/Heroic")
+    for label, path in backend.other_game_paths():
+        add(label, path)
     return found
 
 
 def pick_game_paths():
     print(f"\n  {B}Game folders{R}")
     print(f"  {D}Steam games are found without folders. A process running from a folder{R}")
-    print(f"  {D}listed here (or a Windows .exe from it, via Wine) counts as a game.{R}\n")
+    print(f"  {D}{backend.GAME_PATHS_NOTE}{R}\n")
     chosen = []
     for label, path in detect_game_paths():
         ok(f"{label}: {D}{path}{R}")
@@ -372,7 +292,7 @@ def pick_detection():
     games = ask_yes_no("Dim while a game runs?")
     fullscreen, game_paths = False, []
     if games:
-        print(f"  {D}Only when fullscreen: KDE sees all windows; elsewhere only X11/XWayland games{R}")
+        print(f"  {D}{backend.FULLSCREEN_NOTE}{R}")
         fullscreen = ask_yes_no("…only while a window is fullscreen?", default=False)
         game_paths = pick_game_paths()
 
@@ -412,123 +332,57 @@ def write_config(cfg):
     ok(f"Config written to {dc.CONFIG_FILE}")
 
 
-def install_icon():
-    ICONS_DIR.mkdir(parents=True, exist_ok=True)
-    if ICON_SRC.exists():
-        shutil.copy2(ICON_SRC, ICON_DEST)
-        ok(f"App icon installed to {ICON_DEST}")
-    else:
+def install_icons():
+    icon, messages = backend.install_icons(ASSETS)
+    for m in messages:
+        ok(m)
+    if icon is None and not messages:
         warn("App icon not found in assets/ — skipping")
-    if SVG_SRC.exists():
-        SVG_DEST.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(SVG_SRC, SVG_DEST)
-        ok(f"Symbolic tray icon installed to {SVG_DEST}")
-    else:
-        warn("Symbolic icon not found in assets/ — skipping")
+    return icon
 
 
 def install_scripts():
     APP_HOME.mkdir(parents=True, exist_ok=True)
-    BIN_DIR.mkdir(parents=True, exist_ok=True)
     for name in PROGRAMS + MODULES:
         shutil.copy2(SRC_DIR / name, APP_HOME / name)
     for name in OBSOLETE:
         (APP_HOME / name).unlink(missing_ok=True)
     # so `monitor-dimmer --uninstall` works after the download folder is gone
     shutil.copy2(REPO_DIR / "uninstall.py", APP_HOME / "uninstall.py")
-    # Launchers in ~/.local/bin run the programs with the private venv
-    for name in PROGRAMS:
-        (APP_HOME / name).chmod(0o755)
-        launcher = BIN_DIR / name
-        launcher.unlink(missing_ok=True)
-        launcher.write_text(f'#!/bin/sh\nexec "{VENV_PY}" "{APP_HOME / name}" "$@"\n')
-        launcher.chmod(0o755)
+    ok(f"Programs installed to {APP_HOME}")
+    for launcher in backend.write_launchers(PROGRAMS):
         ok(f"Installed {launcher}")
-    if str(BIN_DIR) not in os.environ.get("PATH", "").split(":"):
-        warn(f"{BIN_DIR} is not in your PATH — run the wizard as {BIN_DIR / 'dimmer'}")
+    note = backend.path_warning()
+    if note:
+        warn(note)
 
 
-def install_service(autostart, indicator):
-    SERVICE_DIR.mkdir(parents=True, exist_ok=True)
-    service = SERVICE_DIR / "monitor-dimmer.service"
-    backend = "Environment=PYSTRAY_BACKEND=appindicator\n" if indicator else ""
-    service.write_text(f"""[Unit]
-Description=Monitor Dimmer — auto-dim secondary screen during games/media
-After=graphical-session.target
-PartOf=graphical-session.target
-
-[Service]
-Type=simple
-ExecStart={BIN_DIR}/monitor-dimmer
-# Put the brightness back if the daemon died while a monitor was dimmed
-ExecStopPost={BIN_DIR}/monitor-dimmer --restore
-Restart=on-failure
-RestartSec=5
-{backend}
-[Install]
-WantedBy=graphical-session.target
-""")
-    ok(f"Service file written to {service}")
-    run(["systemctl", "--user", "daemon-reload"])
-    if autostart:
-        run(["systemctl", "--user", "enable", "monitor-dimmer.service"])
-        ok("Service enabled (starts automatically at login)")
-    else:
-        run(["systemctl", "--user", "disable", "monitor-dimmer.service"])
-        ok("Autostart disabled — start manually with: systemctl --user start monitor-dimmer")
+def install_service(autostart):
+    ok(backend.install_startup(autostart))
 
 
-def install_desktop_entry():
-    APP_DIR.mkdir(parents=True, exist_ok=True)
-    icon = str(ICON_DEST) if ICON_DEST.exists() else "video-display"
-    entry = APP_DIR / "dimmer.desktop"
-    entry.write_text(f"""[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Monitor Dimmer
-Comment=Configure auto-dimming of secondary screen during games or fullscreen media
-Exec={BIN_DIR}/dimmer
-Icon={icon}
-Terminal=true
-Categories=Settings;HardwareSettings;
-Keywords=monitor;brightness;dim;gaming;
-""")
-    ok(f"Desktop entry written to {entry}")
-    for tool in ("kbuildsycoca6", "kbuildsycoca5", "update-desktop-database"):
-        if shutil.which(tool):
-            run([tool] if tool.startswith("kbuild") else [tool, str(APP_DIR)])
+def install_desktop_entry(icon):
+    entry = backend.install_menu_entry(icon)
+    if entry:
+        ok(f"Menu entry written to {entry}")
 
 
-def add_to_kde_favorites():
-    if not KDE_STATS.exists():
-        return
-    content = KDE_STATS.read_text()
-    entry   = "applications:dimmer.desktop"
-    if entry in content:
-        ok("Already in KDE favorites")
-        return
-    new = re.sub(
-        r"(ordering=[^\n]+)",
-        lambda m: m.group(0) + f",{entry}",
-        content
-    )
-    KDE_STATS.write_text(new)
-    ok("Added to KDE application launcher favorites")
+def add_to_favorites():
+    note = backend.add_to_favorites()
+    if note:
+        ok(note)
 
 
 def start_service():
-    run(["systemctl", "--user", "restart", "monitor-dimmer.service"])
-    time.sleep(2)
-    r = run(["systemctl", "--user", "is-active", "monitor-dimmer.service"])
-    if r.stdout.strip() == "active":
-        ok("Service is running")
+    if backend.start_daemon():
+        ok("Monitor Dimmer is running")
     else:
-        warn("Service may not have started — check: systemctl --user status monitor-dimmer")
+        warn("It may not have started — run `dimmer` and check Service")
 
 
 def test_dim():
     print(f"\n  {Y}Testing dim for 3 seconds — look at the chosen screens...{R}")
-    r = run([str(BIN_DIR / "dimmer"), "--test"])
+    r = run([str(VENV_PY), str(APP_HOME / "dimmer"), "--test"])
     print(r.stdout, end="")
     if r.returncode != 0:
         warn("Test failed — run `dimmer` and use \"Test dim\" to investigate")
@@ -564,12 +418,12 @@ def print_summary(cfg, autostart):
 
 
 def main():
+    backend.prepare_console()
     banner()
-    distro = detect_distro()
 
     # 1. Dependencies
-    check_system_tools(distro)
-    indicator = setup_venv(distro)
+    check_system_tools()
+    setup_venv()
 
     # 2. Settings — an update can keep the existing ones
     cfg = dc.load_config()
@@ -579,9 +433,8 @@ def main():
         print(f"  {D}Screens: {dc.screens_label(cfg)}{R}")
         keep = ask_yes_no("Keep your current settings and just update the program?")
     if keep:
-        # keep the user's choice; a first install of the service defaults to on
-        state = run(["systemctl", "--user", "is-enabled", "monitor-dimmer.service"]).stdout.strip()
-        autostart = state in ("enabled", "") or "not-found" in state
+        # keep the user's choice; a first install defaults to starting at login
+        autostart = backend.autostart_enabled() or not (APP_HOME / "monitor-dimmer").exists()
     else:
         screens, dim_level = pick_screens()
         detection = pick_detection()
@@ -595,17 +448,16 @@ def main():
 
     # 3. Install
     step("Installing")
-    install_icon()
     write_config(cfg)
     install_scripts()
-    install_service(autostart, indicator)
-    install_desktop_entry()
+    icon = install_icons()
+    install_service(autostart)
+    install_desktop_entry(icon)
 
-    # 4. KDE favorites (optional)
-    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "")
-    if "KDE" in desktop and not keep:
-        if ask_yes_no("\nAdd to KDE application launcher favorites?"):
-            add_to_kde_favorites()
+    # 4. Pin it, where that means anything
+    prompt = backend.favorites_prompt()
+    if prompt and not keep and ask_yes_no("\n" + prompt):
+        add_to_favorites()
 
     # 5. Start
     step("Starting service")

@@ -172,8 +172,14 @@ def menu_test_dim(cfg):
     finally:
         # also on Ctrl+C: never leave a screen dimmed
         for s, p in procs:
-            p.terminate()
-            if p.wait() != 0:
+            # An overlay that could not find its screen is already gone; one
+            # that worked is still running. The exit code cannot tell us:
+            # terminating a process on Windows always reports failure.
+            quit_early = p.poll() is not None
+            if not quit_early:
+                p.terminate()
+            p.wait()
+            if quit_early:
                 print(f"{RED}  {dc.screen_label(s)}: screen not found{RESET}")
                 ok = False
         for bus, value in restore:
