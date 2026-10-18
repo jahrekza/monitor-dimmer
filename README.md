@@ -15,7 +15,7 @@ Automatically dims your other monitors when you launch a game or play fullscreen
 - **Manual control** — "Dim now" works regardless of detection; auto-dim can be switched off
 - **Two dimming modes**, chosen per screen
   - **Black overlay** *(recommended)* — a borderless black window covers the screen, zero flicker, can go fully black, works on any screen (laptop panels and TVs too); clicks pass through it
-  - **Hardware brightness** — lowers the monitor's own brightness via DDC/CI (`ddcutil`), relative to the brightness you use, and puts it back afterwards
+  - **Hardware brightness** — lowers the monitor's own brightness over DDC/CI (`ddcutil` on Linux, the Monitor Configuration API on Windows), relative to the brightness you use, and puts it back afterwards
 - **Finds your monitor by identity** — serial number / model, not the GPU port, so swapping cables doesn't make it dim the wrong screen; two identical monitors are told apart by connector
 - **Works with borderless windowed games** — detection is process-based; optionally dim only while a game is fullscreen (on KDE this sees native Wayland windows too)
 - **Safe restore** — if the daemon is stopped or crashes while a monitor is dimmed, the brightness is restored
@@ -232,7 +232,7 @@ Saving writes only what you changed, so changes made from the tray in the meanti
 │                                          │          │
 │                                     dim each chosen │
 │                                     screen (overlay │
-│                                     or ddcutil)     │
+│                                     or brightness)  │
 └─────────────────────────────────────────────────────┘
 ```
 

@@ -163,7 +163,8 @@ def menu_test_dim(cfg):
             bus   = dc.find_bus(s, displays)
             level = dc.get_brightness(bus) if bus is not None else None
             if level is None:
-                print(f"{RED}  {dc.screen_label(s)}: not reachable via ddcutil{RESET}")
+                print(f"{RED}  {dc.screen_label(s)}: not reachable via "
+                      f"{backend.BRIGHTNESS_SOURCE}{RESET}")
                 ok = False
                 continue
             restore.append((bus, level[0]))

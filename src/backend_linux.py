@@ -22,6 +22,9 @@ STATE_DIR   = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"
 
 
 # ── DDC/CI (ddcutil) ──────────────────────────────────────────────────────────
+#
+# What to call it when telling the user a monitor did not answer.
+BRIGHTNESS_SOURCE = "ddcutil"
 
 def ddc_displays():
     """Monitors that answer DDC/CI, as [{bus, connector, mfg, model, sn}]."""

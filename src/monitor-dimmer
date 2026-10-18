@@ -94,7 +94,8 @@ def ddc_dim(screen, state, displays):
     bus = dc.find_bus(screen, displays)
     current = dc.get_brightness(bus) if bus is not None else None
     if current is None:
-        dc.warn(f"{dc.screen_label(screen)}: not reachable via ddcutil")
+        dc.warn(f"{dc.screen_label(screen)}: not reachable via "
+                f"{backend.BRIGHTNESS_SOURCE}")
         return
     # Save before dimming, so a crash right after can still restore
     state.append({"screen": ident, "bus": bus, "brightness": current[0]})
@@ -287,7 +288,8 @@ def screen_menu(pystray):
                 text, set_screen(screen, mode=mode),
                 checked=lambda item, s=screen, m=mode: s["mode"] == m,
                 radio=True,
-                # brightness needs DDC/CI; the bus is known once ddcutil saw it
+                # brightness needs DDC/CI; the bus is known once the monitor
+                # has answered once
                 enabled=mode != "ddc" or screen.get("bus") is not None,
             )
             for mode, text in (("off", "Not dimmed"), ("overlay", "Overlay (black window)"),

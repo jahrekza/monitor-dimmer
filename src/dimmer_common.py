@@ -254,9 +254,9 @@ def qt_screens(python=None):
 def all_monitors(python=None):
     """Every screen, with its DDC bus when it has one.
 
-    The compositor knows every screen (laptop panels and TVs too); ddcutil only
-    sees those that speak DDC/CI. Without a graphical session fall back to the
-    ddcutil list alone.
+    The compositor knows every screen (laptop panels and TVs too); only the
+    ones that speak DDC/CI answer the backend. Without a graphical session
+    fall back to that answer alone.
     """
     ddc = ddc_displays()
     screens = qt_screens(python)

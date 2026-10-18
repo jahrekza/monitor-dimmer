@@ -232,6 +232,10 @@ def _identity(device_name):
 
 
 # ── DDC/CI ────────────────────────────────────────────────────────────────────
+#
+# What to call it when telling the user a monitor did not answer. There is no
+# helper program here, the Monitor Configuration API is part of Windows.
+BRIGHTNESS_SOURCE = "DDC/CI"
 
 _handles = {}          # bus number (our index) -> physical monitor handle
 
