@@ -38,6 +38,16 @@ RUN_VALUE = "MonitorDimmer"
 # program is an .exe sitting beside the others.
 FROZEN = bool(getattr(sys, "frozen", False))
 EXE    = ".exe" if FROZEN else ""
+# The downloadable package brings its own Python beside the programs
+BUNDLED = not FROZEN and (HERE / "python" / "python.exe").exists()
+
+
+def _installed_python(windowed=False):
+    """The interpreter the installed copy runs on."""
+    name = "pythonw.exe" if windowed else "python.exe"
+    if BUNDLED:
+        return APP_HOME / "python" / name
+    return (VENV_PYW if windowed and VENV_PYW.exists() else VENV_PY)
 
 
 APP_EXE = "MonitorDimmer.exe"
@@ -789,8 +799,7 @@ def _daemon_argv():
     """How to start the *installed* daemon, windowless."""
     if FROZEN:
         return [str(APP_HOME / APP_EXE), "--role", "daemon"]
-    py = VENV_PYW if VENV_PYW.exists() else VENV_PY
-    return [str(py), str(APP_HOME / "monitor-dimmer")]
+    return [str(_installed_python(windowed=True)), str(APP_HOME / "monitor-dimmer")]
 
 
 def write_launchers(programs):
@@ -801,6 +810,7 @@ def write_launchers(programs):
     if FROZEN:
         return []
     BIN_DIR.mkdir(parents=True, exist_ok=True)
+    python = _installed_python()
     written = []
     for name in programs:
         launcher = BIN_DIR / f"{name}.cmd"
@@ -809,7 +819,7 @@ def write_launchers(programs):
         # would put a stray carriage return on every line.
         launcher.write_text(
             "@echo off\n"
-            f'"{VENV_PY}" "{APP_HOME / name}" %*\n',
+            f'"{python}" "{APP_HOME / name}" %*\n',
             encoding="utf-8")
         written.append(launcher)
     return written
@@ -876,6 +886,11 @@ def uninstall_command():
     """
     if FROZEN:
         return [str(_program_dir() / APP_EXE), "--role", "uninstall"]
+    if BUNDLED:
+        # Our own interpreter lives in the folder we are about to delete;
+        # uninstall_cleanup() schedules that folder for removal afterwards.
+        return [str(_program_dir() / "python" / "python.exe"),
+                str(_program_dir() / "uninstall.py")]
     python = getattr(sys, "_base_executable", None) or sys.executable
     return [python, str(_program_dir() / "uninstall.py")]
 
@@ -893,7 +908,7 @@ def stop_for_uninstall():
 def install_menu_entry(icon=None):
     """Start menu shortcut for the settings wizard, through WScript.Shell."""
     START_MENU.parent.mkdir(parents=True, exist_ok=True)
-    target = str(APP_HOME / APP_EXE) if FROZEN else str(VENV_PY)
+    target = str(APP_HOME / APP_EXE) if FROZEN else str(_installed_python())
     arguments = "--role settings" if FROZEN else '"%s"' % (APP_HOME / "dimmer")
     ps = (
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut({lnk});"
@@ -1013,7 +1028,7 @@ def uninstall_items():
     delete a running executable. uninstall_cleanup() sees to it afterwards.
     """
     dirs = [STATE_DIR, CONFIG_FILE.parent]
-    if not FROZEN:
+    if not FROZEN and not BUNDLED:
         dirs.insert(0, APP_HOME)
     return ([START_MENU, CONFIG_FILE], dirs)
 
@@ -1039,7 +1054,7 @@ def uninstall_cleanup():
     """Whatever is left once the files are gone."""
     import winreg
     notes = []
-    if FROZEN and APP_HOME.exists():
+    if (FROZEN or BUNDLED) and APP_HOME.exists():
         _delete_after_exit(APP_HOME)
         notes.append("%s goes as soon as this window closes" % APP_HOME)
     try:

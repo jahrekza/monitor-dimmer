@@ -43,6 +43,15 @@ def _program_dir():
 
 PROGRAM_DIR = _program_dir()
 
+# The downloadable package ships its own Python next to the programs, so
+# nothing has to be installed first and nothing is left unsigned.
+BUNDLED = not FROZEN and (PROGRAM_DIR / "python" / "python.exe").exists()
+
+
+def bundled_python(root, windowed=False):
+    """The interpreter shipped inside `root`."""
+    return root / "python" / ("pythonw.exe" if windowed else "python.exe")
+
 
 def program_command(name, *args):
     """The argv that runs one of our own programs."""
@@ -243,7 +252,11 @@ set_brightness = backend.set_brightness
 def qt_screens(python=None):
     """Screens as the compositor sees them, as [{connector, mfg, model, sn}]."""
     try:
-        cmd = (program_command("monitor-dimmer-overlay", "--list") if FROZEN or not python
+        # In a frozen or bundled shape our own interpreter is already the
+        # right one; the caller's suggestion belongs to a virtualenv that
+        # does not exist there.
+        cmd = (program_command("monitor-dimmer-overlay", "--list")
+               if FROZEN or BUNDLED or not python
                else [python, str(OVERLAY_BIN), "--list"])
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=15).stdout
         return json.loads(out)

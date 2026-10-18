@@ -151,9 +151,9 @@ def setup_venv():
     """Private virtualenv for the Python packages, so nothing touches the
     system Python (pip --user is refused on PEP 668 distros). Which packages
     may come from the system instead is the backend's call."""
-    if dc.FROZEN:
-        # Built into executables: Python, the virtualenv and pip are all
-        # baked in, so there is nothing to set up.
+    if dc.FROZEN or dc.BUNDLED:
+        # Built into executables, or shipped with its own Python: the
+        # packages are already here and there is nothing to set up.
         return
     step("Setting up Python environment")
     if not VENV_PY.exists():
@@ -349,7 +349,7 @@ def install_icons():
 
 def install_scripts():
     APP_HOME.mkdir(parents=True, exist_ok=True)
-    if dc.FROZEN:
+    if dc.FROZEN or dc.BUNDLED:
         source = dc.PROGRAM_DIR
         if source != APP_HOME:
             for item in source.iterdir():
@@ -407,7 +407,8 @@ def installed_command(name, *args):
     args = [str(a) for a in args]
     if dc.FROZEN:
         return [str(APP_HOME / dc.APP_EXE), "--role", dc.ROLES[name], *args]
-    return [str(VENV_PY), str(APP_HOME / name), *args]
+    python = dc.bundled_python(APP_HOME) if dc.BUNDLED else VENV_PY
+    return [str(python), str(APP_HOME / name), *args]
 
 
 def test_dim():
@@ -433,6 +434,10 @@ def how_to_run():
         return ("Monitor Dimmer in the Start menu",
                 "%s --role uninstall" % (APP_HOME / dc.APP_EXE),
                 "This installer file is no longer needed and can be deleted")
+    if dc.BUNDLED:
+        return ("Monitor Dimmer in the Start menu",
+                "%s %s" % (dc.bundled_python(APP_HOME), APP_HOME / "uninstall.py"),
+                "This unpacked folder is no longer needed and can be deleted")
     return ("run dimmer",
             "run monitor-dimmer --uninstall",
             "This download folder is no longer needed and can be deleted")

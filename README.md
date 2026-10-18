@@ -92,6 +92,16 @@ python3 install.py
 
 ### Windows
 
+**The package — nothing needed beforehand**
+
+Download `monitor-dimmer-windows.zip` from the
+[releases](https://github.com/jahrekza/monitor-dimmer/releases), unpack it
+anywhere, and double-click **Install Monitor Dimmer.cmd**. No git, no Python,
+no administrator rights: it brings its own Python, the one signed by the
+Python Software Foundation, so Windows has no unsigned program to object to.
+
+**From the source, if you already have Python**
+
 In PowerShell or Windows Terminal:
 
 ```powershell
@@ -102,7 +112,7 @@ python install.py
 
 Without git, download the repository as a ZIP, unpack it, and run `python install.py` in the unpacked folder. Nothing needs administrator rights — everything is installed for your user only.
 
-If you would rather have a single file to double-click, and no Python on the machine at all, see [Building the Windows executables](#building-the-windows-executables).
+Both ways install the same thing. [Building the Windows package](#building-the-windows-package) covers making the zip yourself.
 
 ### What the installer does
 
@@ -127,31 +137,38 @@ python3 install.py
 
 If you deleted the folder, download it again as described above and run `python3 install.py`. The installer offers to keep your current settings and only update the program.
 
-### Building the Windows executables
-
-Everything above needs Python on the machine. `packaging/build_windows.py` turns the project into executables that do not:
+### Building the Windows package
 
 ```powershell
-pip install pyinstaller PyQt6 pystray pillow
-python packaging/build_windows.py
+pip install PyQt6 pystray pillow
+python packaging/build_windows_zip.py
 ```
 
-Two things land in `dist/`:
+This downloads the official embeddable Python, puts the packages and the
+programs beside it, and writes `dist/monitor-dimmer-windows.zip` — the file
+from the releases page. Around 90 MB, most of it Qt.
 
-| | |
-|---|---|
-| `MonitorDimmer/` | The application — one folder with one executable |
-| `monitor-dimmer-setup.exe` | One file carrying that folder inside it: the one to hand to someone |
-
-That single executable plays every part, and `--role` says which: `daemon`, `overlay`, `settings` or `uninstall`. With no role at all it is the installer, so double-clicking it does the obvious thing. What it installs needs neither Python nor a virtual environment, and the uninstaller removes the program folder once it has exited.
-
-**Smart App Control.** On a clean Windows 11 this is on by default, and it judges every executable by Microsoft's reputation service. A binary built minutes ago has no reputation, and Windows may simply refuse to start it:
+Nothing in it is unsigned: the only executables are `python.exe` and
+`pythonw.exe`, both signed by the Python Software Foundation. That matters
+more than it sounds. **Smart App Control**, on by default on a clean
+Windows 11, judges every executable by Microsoft's reputation service, and a
+binary built minutes ago has none. It refuses with:
 
 ```
 OSError: [WinError 4551] An Application Control policy has blocked this file
 ```
 
-with event 3118, *Smart App Control Block*, in the `Microsoft-Windows-CodeIntegrity/Operational` log. It is not a blanket ban on unsigned programs — the verdict is made per file, and most builds run until one does not. A signature from a certificate authority Microsoft trusts is the only dependable answer; a self-signed certificate does not count, and the feature cannot be turned back on once turned off. The Python installer above is unaffected, which is why both ways in are kept.
+and event 3118, *Smart App Control Block*, in the
+`Microsoft-Windows-CodeIntegrity/Operational` log. The verdict is made per
+file rather than as a blanket ban, so an unsigned program may run for a
+while and then stop being allowed to. The only dependable answers are a
+signature from a certificate authority Microsoft trusts — a self-signed one
+does not count — or, as here, shipping no unsigned executables at all.
+
+There is also `packaging/build_windows.py`, which builds the whole thing into
+one `MonitorDimmer.exe` with PyInstaller plus a single-file installer. It
+works, and it is what Smart App Control blocked; it is kept for machines
+where that feature is off, or for whenever the binaries get signed.
 
 ---
 
@@ -273,7 +290,8 @@ Placing a window on a chosen screen is up to the compositor: KDE Plasma and X11 
 | `src/backend_linux.py` | Everything Linux-specific: ddcutil, `/proc` + Steam, VLC over MPRIS, KWin script / xprop, systemd, terminals |
 | `src/backend_windows.py` | The same interface on Win32 APIs: DDC/CI through dxva2, monitor identity from the registry's EDID, Steam's `RunningAppID`, windows and job objects through user32/kernel32 |
 
-| `packaging/build_windows.py` | Builds the Windows executables with PyInstaller |
+| `packaging/build_windows_zip.py` | Builds the downloadable package: embeddable Python, the libraries and the programs |
+| `packaging/build_windows.py` | Builds the same thing into executables with PyInstaller |
 | `packaging/app.py` | Entry point of that build: picks the program to run from `--role` |
 
 The daemon, settings and installer reach the operating system only through the backend, which `dimmer_common.py` picks by platform.
