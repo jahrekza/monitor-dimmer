@@ -84,9 +84,10 @@ def stop_overlay(key):
         p.stop()
 
 
-def ddc_dim(screen, state, displays):
+def ddc_dim(screen, state, displays, level=None, quiet=False):
     ident = dc.identity_of(screen)
-    level = dc.screen_level(CFG, screen)
+    if level is None:
+        level = dc.screen_level(CFG, screen)
     for e in state:
         if e.get("screen") == ident:              # already dimmed: follow a level change
             dc.set_brightness(e["bus"], dc.dimmed_value(e["brightness"], level))
@@ -94,6 +95,8 @@ def ddc_dim(screen, state, displays):
     bus = dc.find_bus(screen, displays)
     current = dc.get_brightness(bus) if bus is not None else None
     if current is None:
+        if quiet:
+            return
         dc.warn(f"{dc.screen_label(screen)}: not reachable via "
                 f"{backend.BRIGHTNESS_SOURCE}")
         return
@@ -125,7 +128,10 @@ def apply():
     with lock:
         want = force_on or (CFG["auto_dim"] and detected is not None)
         overlay_on = {overlay_key(s) for s in CFG["screens"] if want and s["mode"] == "overlay"}
-        ddc_on = [dc.identity_of(s) for s in CFG["screens"] if want and s["mode"] == "ddc"]
+        # overlay screens also get their backlight turned all the way down
+        # when they speak DDC/CI, so the black overlay is truly dark
+        ddc_on = [dc.identity_of(s) for s in CFG["screens"]
+                  if want and s["mode"] in ("ddc", "overlay")]
 
         for key in [k for k in overlays if k not in overlay_on]:
             stop_overlay(key)
@@ -136,6 +142,7 @@ def apply():
         for s in CFG["screens"]:
             if overlay_key(s) in overlay_on:
                 start_overlay(s)
+                ddc_dim(s, state, displays, level=100, quiet=True)
             elif want and s["mode"] == "ddc":
                 ddc_dim(s, state, displays)
     update_tray()

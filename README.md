@@ -275,6 +275,8 @@ The list is `video_titles` in the config; edit it in `dimmer` → *Video sites* 
 - Instant on/off
 - Works on screens without DDC/CI
 
+If the screen also speaks DDC/CI, its brightness is turned down to minimum while the overlay is up and restored afterwards, so the black overlay is as dark as the panel allows.
+
 Placing a window on a chosen screen is up to the compositor: KDE Plasma and X11 desktops honour it; on other Wayland desktops use hardware brightness if the overlay lands on the wrong screen.
 
 **Hardware brightness** reads the monitor's current brightness, lowers it by the dim intensity (70% dim of brightness 60 → 18) and restores the saved value afterwards. The saved value is kept in `~/.local/state/monitor-dimmer/` until it has been restored, so a crash or `systemctl stop` mid-game doesn't leave the screen dark.
